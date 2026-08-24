@@ -18,7 +18,8 @@
 // wipe can destroy it.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import { appendEntry, loadIndex, saveIndex, usageOfRun, usageOfStage } from "./ledger.mjs";
 import { applyView, VIEW_MARKER } from "./set-view.mjs";
@@ -386,6 +387,114 @@ function tick() {
   writeFileSync(boardPath, JSON.stringify(board, null, 2));
 }
 
+// ── Control bridge ─────────────────────────────────────────────────────────
+// Local unix socket the optional atomic extension (and the board) connect
+// to. Extensions introduce themselves with {type:"hello", paneId, sessionId,
+// cwd}; the board sends {type:"control", verb, runId, cwd}. The watcher
+// routes a control request to the ONE extension connection whose cwd matches
+// — with zero or several candidates it refuses, because under the same-cwd
+// status.json clobber it cannot know which session owns the run.
+const bridgePath = path.join(STATE_DIR, "bridge.sock");
+const VERBS = {
+  pause: (runId) => `/workflow pause ${runId}`,
+  resume: (runId) => `/workflow resume ${runId}`,
+  interrupt: (runId) => `/workflow interrupt ${runId} -y`,
+  quit: (runId) => `/workflow quit ${runId}`,
+};
+const bridgeClients = new Set(); // {sock, paneId, sessionId, cwd}
+const pendingCommands = new Map(); // command id -> {reply, timer}
+
+function bridgeReply(sock, msg) {
+  try {
+    sock.write(`${JSON.stringify(msg)}\n`);
+  } catch {
+    // connection already gone
+  }
+}
+
+function handleControl(sock, msg) {
+  const verb = VERBS[msg.verb];
+  const runId = String(msg.runId ?? "");
+  if (!verb || !/^[0-9a-f-]{36}$/i.test(runId)) {
+    bridgeReply(sock, { type: "control-result", id: msg.id, ok: false, message: "bad verb or runId" });
+    return;
+  }
+  const candidates = [...bridgeClients].filter((c) => c.cwd === msg.cwd);
+  if (candidates.length === 0) {
+    bridgeReply(sock, {
+      type: "control-result", id: msg.id, ok: false,
+      message: "no atomic bridge for this project — install the atomic integration and start a fresh atomic session",
+    });
+    return;
+  }
+  if (candidates.length > 1) {
+    bridgeReply(sock, {
+      type: "control-result", id: msg.id, ok: false,
+      message: `ambiguous: ${candidates.length} atomic sessions share this cwd; run the command in the pane instead`,
+    });
+    return;
+  }
+  const target = candidates[0];
+  const timer = setTimeout(() => {
+    pendingCommands.delete(msg.id);
+    bridgeReply(sock, { type: "control-result", id: msg.id, ok: false, message: "bridge timeout (session busy or gone?)" });
+  }, 5000);
+  pendingCommands.set(msg.id, { reply: sock, timer });
+  bridgeReply(target.sock, { type: "command", id: msg.id, text: verb(runId) });
+}
+
+function startBridge() {
+  try {
+    rmSync(bridgePath, { force: true });
+  } catch {
+    // stale socket file cleanup is best-effort
+  }
+  const server = net.createServer((sock) => {
+    let buf = "";
+    let client = null; // set on hello (extension connections only)
+    sock.on("data", (chunk) => {
+      buf += chunk;
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (!line.trim()) continue;
+        let msg;
+        try {
+          msg = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (msg?.type === "hello" && msg.protocol === 1) {
+          client = { sock, paneId: msg.paneId, sessionId: msg.sessionId, cwd: msg.cwd };
+          bridgeClients.add(client);
+        } else if (msg?.type === "control") {
+          handleControl(sock, msg);
+        } else if (msg?.type === "result") {
+          const pending = pendingCommands.get(msg.id);
+          if (pending) {
+            clearTimeout(pending.timer);
+            pendingCommands.delete(msg.id);
+            bridgeReply(pending.reply, {
+              type: "control-result", id: msg.id, ok: Boolean(msg.ok),
+              message: msg.ok ? "delivered" : String(msg.error ?? "failed"),
+            });
+          }
+        }
+      }
+    });
+    const drop = () => {
+      if (client) bridgeClients.delete(client);
+    };
+    sock.on("error", drop);
+    sock.on("close", drop);
+  });
+  server.on("error", () => {
+    // Another watcher instance owns the socket; start-watcher kills us soon.
+  });
+  server.listen(bridgePath);
+}
+
 setInterval(() => {
   try {
     tick();
@@ -394,6 +503,7 @@ setInterval(() => {
   }
 }, POLL_MS);
 tick();
+startBridge();
 
 // The workflows-only agent view is transient (dies with the herdr server):
 // if the user had it on, reapply it every watcher start. Fail soft.

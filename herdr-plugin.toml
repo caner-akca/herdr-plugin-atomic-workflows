@@ -28,6 +28,12 @@ title = "Toggle workflows-only view"
 contexts = ["workspace"]
 command = ["node", "bin/set-view.mjs"]
 
+[[actions]]
+id = "install-atomic-bridge"
+title = "Install atomic integration (control verbs)"
+contexts = ["workspace"]
+command = ["node", "bin/install-extension.mjs"]
+
 [[panes]]
 id = "board"
 title = "Workflows"

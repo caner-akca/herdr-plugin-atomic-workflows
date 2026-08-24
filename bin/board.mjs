@@ -5,6 +5,7 @@
 
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { readHistory, usageOfRun, usageOfStage } from "./ledger.mjs";
@@ -19,6 +20,66 @@ const RUNS_ROOT = path.join(
 // files, rebuilt on every active-view render. Digit keys open them in a
 // viewer pane (new tab) via `herdr plugin pane open`.
 let linkTargets = [];
+
+// ── Control verbs (need the optional atomic integration installed) ────────
+// Selected run gets a ▸ cursor (n cycles); p/r/i/Q send pause/resume/
+// interrupt/quit through the watcher's bridge socket to the atomic session
+// owning that project. Destructive verbs ask for the key twice.
+let controlRuns = []; // {runId, name, cwd, status} in render order
+let selIdx = 0;
+let pendingVerb = null; // {verb, runId, until}
+let statusMsg = "";
+
+const BRIDGE_PATH = path.join(
+  process.env.HERDR_PLUGIN_STATE_DIR || "/tmp/atomic-workflows-plugin",
+  "bridge.sock",
+);
+
+function sendControl(verb, run) {
+  const id = `board:${Date.now()}:${Math.floor(Math.random() * 1e6)}`;
+  const sock = net.createConnection(BRIDGE_PATH);
+  let buf = "";
+  const done = (msg) => {
+    statusMsg = msg;
+    sock.destroy();
+    render();
+  };
+  const timer = setTimeout(() => done(`${verb}: watcher not answering`), 7000);
+  sock.on("error", () => {
+    clearTimeout(timer);
+    done(`${verb}: bridge socket unavailable — is the watcher running?`);
+  });
+  sock.on("connect", () =>
+    sock.write(`${JSON.stringify({ type: "control", id, verb, runId: run.runId, cwd: run.cwd })}\n`),
+  );
+  sock.on("data", (chunk) => {
+    buf += chunk;
+    const nl = buf.indexOf("\n");
+    if (nl < 0) return;
+    clearTimeout(timer);
+    try {
+      const msg = JSON.parse(buf.slice(0, nl));
+      done(`${verb} ${run.name}: ${msg.ok ? "✓ " : "✗ "}${msg.message}`);
+    } catch {
+      done(`${verb}: bad bridge reply`);
+    }
+  });
+}
+
+function requestVerb(verb, destructive) {
+  const run = controlRuns[selIdx];
+  if (!run) return;
+  if (destructive && !(pendingVerb?.verb === verb && pendingVerb.runId === run.runId && Date.now() < pendingVerb.until)) {
+    pendingVerb = { verb, runId: run.runId, until: Date.now() + 3000 };
+    statusMsg = `press ${verb === "quit" ? "Q" : "i"} again to confirm ${verb} of ${run.name}`;
+    render();
+    return;
+  }
+  pendingVerb = null;
+  statusMsg = `${verb} ${run.name}…`;
+  render();
+  sendControl(verb, run);
+}
 
 function latestRunTranscript(runId) {
   const dir = path.join(RUNS_ROOT, String(runId).replace(/[^A-Za-z0-9._-]/g, "_"), "transcripts");
@@ -117,7 +178,7 @@ function failureLine(x) {
   return bits.length ? bits.join(" · ") : null;
 }
 
-function projectLines(project, now, width, targets) {
+function projectLines(project, now, width, targets, runsOut) {
   const lines = [];
   lines.push(`${BOLD(` ${path.basename(project.cwd)}`)}  ${DIM(project.cwd)}`);
   lines.push(DIM(`   panes: ${project.panes.join(", ")}`));
@@ -136,7 +197,10 @@ function projectLines(project, now, width, targets) {
     const usage = usageOfRun(run);
     const cost = usage.cost > 0 ? DIM(` · ${fmtCost(usage.cost)} · ${usage.turns} turns`) : "";
     const runLink = linkMark(targets, latestRunTranscript(run.id));
-    lines.push(`   ${GLYPH[run.status] ?? "?"} ${BOLD(run.name)} [${run.status}] ${DIM(dur)}${cost}${origin}${runLink}`);
+    const runIdx = runsOut.length;
+    runsOut.push({ runId: run.id, name: run.name, cwd: project.cwd, status: run.status });
+    const cursor = runIdx === selIdx ? "▸" : " ";
+    lines.push(` ${cursor} ${GLYPH[run.status] ?? "?"} ${BOLD(run.name)} [${run.status}] ${DIM(dur)}${cost}${origin}${runLink}`);
     const runFailed =
       run.failureKind || run.error || ["failed", "blocked", "killed", "cancelled"].includes(run.status);
     const runFailure = runFailed ? failureLine(run) : null;
@@ -238,9 +302,16 @@ function render() {
     body = historyLines(now, width);
   } else {
     const targets = [];
-    body = board.projects.flatMap((p) => projectLines(p, now, width, targets));
+    const runs = [];
+    body = board.projects.flatMap((p) => projectLines(p, now, width, targets, runs));
     linkTargets = targets;
-    if (targets.length) body.push(DIM(`  [1-${targets.length}] open transcript in a new tab`));
+    controlRuns = runs;
+    if (selIdx >= runs.length) selIdx = 0;
+    const hints = [];
+    if (targets.length) hints.push(`[1-${targets.length}] transcript`);
+    if (runs.length) hints.push("n select · p/r pause/resume · i/Q interrupt/quit");
+    if (hints.length) body.push(DIM(`  ${hints.join(" · ")}`));
+    if (statusMsg) body.push(`  ${YELLOW(statusMsg)}`);
   }
   lastBodyLen = body.length;
   const visible = Math.max(4, rows - 4);
@@ -275,6 +346,14 @@ process.stdin.on("data", (key) => {
     openViewer(linkTargets[Number(s) - 1]);
     return;
   }
+  else if (view === "active" && (s === "n" || s === "\t") && controlRuns.length) {
+    selIdx = (selIdx + 1) % controlRuns.length;
+    pendingVerb = null;
+  }
+  else if (view === "active" && s === "p") { requestVerb("pause", false); return; }
+  else if (view === "active" && s === "r") { requestVerb("resume", false); return; }
+  else if (view === "active" && s === "i") { requestVerb("interrupt", true); return; }
+  else if (view === "active" && s === "Q") { requestVerb("quit", true); return; }
   else return;
   render();
 });
