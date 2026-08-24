@@ -21,6 +21,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { appendEntry, loadIndex, saveIndex, usageOfRun, usageOfStage } from "./ledger.mjs";
+import { applyView, VIEW_MARKER } from "./set-view.mjs";
 
 const HERDR = process.env.HERDR_BIN_PATH || "herdr";
 const STATE_DIR = process.env.HERDR_PLUGIN_STATE_DIR || "/tmp/atomic-workflows-plugin";
@@ -393,3 +394,7 @@ setInterval(() => {
   }
 }, POLL_MS);
 tick();
+
+// The workflows-only agent view is transient (dies with the herdr server):
+// if the user had it on, reapply it every watcher start. Fail soft.
+if (existsSync(VIEW_MARKER)) applyView().catch(() => {});

@@ -3,9 +3,49 @@
 // timing, models, prompts, and failure details.
 // q / esc / ctrl+c closes; j/k or arrows scroll; g/G jump.
 
-import { existsSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { readHistory, usageOfRun, usageOfStage } from "./ledger.mjs";
+
+const HERDR = process.env.HERDR_BIN_PATH || "herdr";
+const RUNS_ROOT = path.join(
+  process.env.ATOMIC_WORKFLOW_ARTIFACT_DIR || path.join(os.homedir(), ".atomic", "workflows"),
+  "runs",
+);
+
+// Deep-link targets ([1]..[9]): stage session transcripts and run transcript
+// files, rebuilt on every active-view render. Digit keys open them in a
+// viewer pane (new tab) via `herdr plugin pane open`.
+let linkTargets = [];
+
+function latestRunTranscript(runId) {
+  const dir = path.join(RUNS_ROOT, String(runId).replace(/[^A-Za-z0-9._-]/g, "_"), "transcripts");
+  try {
+    const files = readdirSync(dir).filter((f) => f.endsWith(".md"));
+    if (!files.length) return null;
+    files.sort((a, b) => statSync(path.join(dir, b)).mtimeMs - statSync(path.join(dir, a)).mtimeMs);
+    return path.join(dir, files[0]);
+  } catch {
+    return null;
+  }
+}
+
+function linkMark(targets, file) {
+  if (!file || targets.length >= 9) return "";
+  targets.push(file);
+  return DIM(` [${targets.length}]`);
+}
+
+function openViewer(file) {
+  spawnSync(HERDR, [
+    "plugin", "pane", "open",
+    "--plugin", "atomic.workflows",
+    "--entrypoint", "viewer",
+    "--env", `VIEW_TARGET=${file}`,
+  ], { timeout: 10000 });
+}
 
 const STATE_DIR = process.env.HERDR_PLUGIN_STATE_DIR || "/tmp/atomic-workflows-plugin";
 const boardPath = path.join(STATE_DIR, "board.json");
@@ -77,7 +117,7 @@ function failureLine(x) {
   return bits.length ? bits.join(" · ") : null;
 }
 
-function projectLines(project, now, width) {
+function projectLines(project, now, width, targets) {
   const lines = [];
   lines.push(`${BOLD(` ${path.basename(project.cwd)}`)}  ${DIM(project.cwd)}`);
   lines.push(DIM(`   panes: ${project.panes.join(", ")}`));
@@ -95,7 +135,8 @@ function projectLines(project, now, width) {
     const origin = run.origin === "agent" ? DIM(" (agent-launched)") : "";
     const usage = usageOfRun(run);
     const cost = usage.cost > 0 ? DIM(` · ${fmtCost(usage.cost)} · ${usage.turns} turns`) : "";
-    lines.push(`   ${GLYPH[run.status] ?? "?"} ${BOLD(run.name)} [${run.status}] ${DIM(dur)}${cost}${origin}`);
+    const runLink = linkMark(targets, latestRunTranscript(run.id));
+    lines.push(`   ${GLYPH[run.status] ?? "?"} ${BOLD(run.name)} [${run.status}] ${DIM(dur)}${cost}${origin}${runLink}`);
     const runFailed =
       run.failureKind || run.error || ["failed", "blocked", "killed", "cancelled"].includes(run.status);
     const runFailure = runFailed ? failureLine(run) : null;
@@ -110,7 +151,8 @@ function projectLines(project, now, width) {
       const stageDur = fmtDur(elapsed(stage, now));
       const stageCost = fmtCost(usageOfStage(stage).cost);
       const meta = [stageDur, model, stageCost].filter(Boolean).join(" · ");
-      lines.push(`      ${GLYPH[stage.status] ?? "?"} ${stage.name} (${stage.status}) ${DIM(meta)}`);
+      const stageLink = linkMark(targets, stage.sessionFile && existsSync(stage.sessionFile) ? stage.sessionFile : null);
+      lines.push(`      ${GLYPH[stage.status] ?? "?"} ${stage.name} (${stage.status}) ${DIM(meta)}${stageLink}`);
       if (stage.status === "awaiting_input") {
         const waitAge = Number.isFinite(stage.awaitingInputSince) ? ` — waiting ${fmtDur(now - stage.awaitingInputSince)}` : "";
         const prompt = stagePrompt(stage, run);
@@ -191,10 +233,15 @@ function render() {
     console.log(`  no active workflow runs ${DIM("(h: history)")}\n\n  ${freshness}`);
     return;
   }
-  const body =
-    view === "history"
-      ? historyLines(now, width)
-      : board.projects.flatMap((p) => projectLines(p, now, width));
+  let body;
+  if (view === "history") {
+    body = historyLines(now, width);
+  } else {
+    const targets = [];
+    body = board.projects.flatMap((p) => projectLines(p, now, width, targets));
+    linkTargets = targets;
+    if (targets.length) body.push(DIM(`  [1-${targets.length}] open transcript in a new tab`));
+  }
   lastBodyLen = body.length;
   const visible = Math.max(4, rows - 4);
   offset = Math.max(0, Math.min(offset, body.length - visible));
@@ -224,6 +271,10 @@ process.stdin.on("data", (key) => {
   else if (s === "G") offset = Math.max(0, lastBodyLen - visible);
   else if (s === "h" && view !== "history") { view = "history"; offset = 0; }
   else if (s === "a" && view !== "active") { view = "active"; offset = 0; }
+  else if (view === "active" && s >= "1" && s <= "9" && linkTargets[Number(s) - 1]) {
+    openViewer(linkTargets[Number(s) - 1]);
+    return;
+  }
   else return;
   render();
 });

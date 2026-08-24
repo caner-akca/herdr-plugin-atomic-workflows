@@ -1,6 +1,6 @@
 id = "atomic.workflows"
 name = "Atomic Workflows"
-version = "0.4.0"
+version = "0.5.0"
 min_herdr_version = "0.7.0"
 description = "Show running atomic workflow status under agents in the herdr sidebar, with a popup board for details."
 platforms = ["linux", "macos"]
@@ -22,6 +22,12 @@ title = "Restart workflow watcher"
 contexts = ["workspace"]
 command = ["node", "bin/start-watcher.mjs"]
 
+[[actions]]
+id = "toggle-workflows-view"
+title = "Toggle workflows-only view"
+contexts = ["workspace"]
+command = ["node", "bin/set-view.mjs"]
+
 [[panes]]
 id = "board"
 title = "Workflows"
@@ -29,3 +35,9 @@ placement = "popup"
 width = "80%"
 height = 24
 command = ["node", "bin/board.mjs"]
+
+[[panes]]
+id = "viewer"
+title = "Workflow transcript"
+placement = "tab"
+command = ["node", "bin/viewer.mjs"]

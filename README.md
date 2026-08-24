@@ -74,6 +74,15 @@ run name and current stage, and a popup board shows every run and stage.
   verdicts, not atomic's word).
 - **Workspace rollups:** `$wf_active` / `$wf_needy` tokens for the Spaces
   sidebar rows show per-workspace workflow load.
+- **Workflows-only view:** the *Toggle workflows-only view* action filters
+  herdr's Agents sidebar to panes with an active workflow (most
+  attention-worthy first). The projection is transient in herdr; the watcher
+  reapplies it on startup while toggled on.
+- **Transcript deep links:** on the board, stages with a session transcript
+  and runs with rendered transcripts get `[1]`-`[9]` markers — press the
+  digit to open the file in a viewer tab (session `.jsonl` files are
+  rendered entry-by-entry; `q` closes). Note: atomic prunes run artifacts
+  after ~30 days.
 - **Stale/dead detection:** atomic's status file has no heartbeat, and a
   killed atomic leaves `status: "running"` on disk forever. While a run
   claims to be actively executing, no status write for 45 s marks it
