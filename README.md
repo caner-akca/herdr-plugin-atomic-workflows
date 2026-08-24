@@ -29,6 +29,14 @@ run name and current stage, and a popup board shows every run and stage.
      ["agent", "state_text"],
      [{ token = "$wf", fg = "#89b4fa", bold = true }],
      [{ token = "$wf_stage", dim = true }],
+     [{ token = "$wf_cost", dim = true }],
+   ]
+
+   # optional: workspace-level rollups on the Spaces rows
+   [ui.sidebar.spaces]
+   rows = [
+     ["state_icon", "workspace", "branch"],
+     [{ token = "$wf_active", dim = true }, { token = "$wf_needy", fg = "#f38ba8" }],
    ]
    ```
 
@@ -54,6 +62,18 @@ run name and current stage, and a popup board shows every run and stage.
 - The board shows per-stage elapsed time and model, failure details
   (`failureKind/failureCode`, retry countdown, resumable), atomic notices,
   and pending-stage counts. Scroll with `j`/`k` (or arrows), `g`/`G` to jump.
+- **Cost telemetry:** per-stage and per-run USD cost + turn counts (from
+  atomic's `modelAttempts[].usage`) in the board, and a `$wf_cost` sidebar
+  token. This data exists *only* in the live status file — nothing else
+  records it.
+- **History:** press `h` on the board for the run ledger — every observed
+  run's outcome, duration, and final cost, journaled by the watcher to
+  NDJSON under the plugin state dir (`ledger/*.ndjson`, greppable) before
+  atomic's session-start wipe destroys it. Runs that vanish mid-flight are
+  recorded as `lost`; dead-file verdicts as `dead` (both marked as watcher
+  verdicts, not atomic's word).
+- **Workspace rollups:** `$wf_active` / `$wf_needy` tokens for the Spaces
+  sidebar rows show per-workspace workflow load.
 - **Stale/dead detection:** atomic's status file has no heartbeat, and a
   killed atomic leaves `status: "running"` on disk forever. While a run
   claims to be actively executing, no status write for 45 s marks it

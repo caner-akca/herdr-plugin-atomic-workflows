@@ -5,6 +5,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { readHistory, usageOfRun, usageOfStage } from "./ledger.mjs";
 
 const STATE_DIR = process.env.HERDR_PLUGIN_STATE_DIR || "/tmp/atomic-workflows-plugin";
 const boardPath = path.join(STATE_DIR, "board.json");
@@ -38,6 +39,11 @@ function fmtDur(ms) {
 function fmtModel(model) {
   if (!model) return "";
   return model.includes("/") ? model.split("/").pop() : model;
+}
+
+function fmtCost(cost) {
+  if (!Number.isFinite(cost) || cost <= 0) return "";
+  return cost >= 10 ? `$${cost.toFixed(0)}` : `$${cost.toFixed(2)}`;
 }
 
 // Elapsed for a run/stage: final duration when ended, wall-clock since start
@@ -87,7 +93,9 @@ function projectLines(project, now, width) {
   for (const run of project.runs) {
     const dur = fmtDur(elapsed(run, now));
     const origin = run.origin === "agent" ? DIM(" (agent-launched)") : "";
-    lines.push(`   ${GLYPH[run.status] ?? "?"} ${BOLD(run.name)} [${run.status}] ${DIM(dur)}${origin}`);
+    const usage = usageOfRun(run);
+    const cost = usage.cost > 0 ? DIM(` · ${fmtCost(usage.cost)} · ${usage.turns} turns`) : "";
+    lines.push(`   ${GLYPH[run.status] ?? "?"} ${BOLD(run.name)} [${run.status}] ${DIM(dur)}${cost}${origin}`);
     const runFailed =
       run.failureKind || run.error || ["failed", "blocked", "killed", "cancelled"].includes(run.status);
     const runFailure = runFailed ? failureLine(run) : null;
@@ -100,7 +108,8 @@ function projectLines(project, now, width) {
       }
       const model = fmtModel(stage.model);
       const stageDur = fmtDur(elapsed(stage, now));
-      const meta = [stageDur, model].filter(Boolean).join(" · ");
+      const stageCost = fmtCost(usageOfStage(stage).cost);
+      const meta = [stageDur, model, stageCost].filter(Boolean).join(" · ");
       lines.push(`      ${GLYPH[stage.status] ?? "?"} ${stage.name} (${stage.status}) ${DIM(meta)}`);
       if (stage.status === "awaiting_input") {
         const waitAge = Number.isFinite(stage.awaitingInputSince) ? ` — waiting ${fmtDur(now - stage.awaitingInputSince)}` : "";
@@ -124,6 +133,31 @@ function projectLines(project, now, width) {
 
 let offset = 0;
 let lastBodyLen = 0;
+let view = "active"; // "active" | "history"
+
+// History rows come from the plugin's own NDJSON ledger — the only durable
+// record (atomic wipes status.json on session_start; cost exists nowhere
+// else). Synthetic statuses (lost/dead) are the watcher's verdicts.
+function historyLines(now, width) {
+  const rows = readHistory(200);
+  if (rows.length === 0) return [DIM("  no journaled runs yet — history fills in as workflows run")];
+  const lines = [];
+  for (const row of rows) {
+    const glyph = GLYPH[row.status] ?? (row.status === "lost" || row.status === "dead" ? "?" : "·");
+    const dur = Number.isFinite(row.durationMs) ? fmtDur(row.durationMs) : "";
+    const cost = fmtCost(row.usage?.cost);
+    const when = row.endedAt ?? row.startedAt;
+    const ago = Number.isFinite(when) ? `${fmtDur(now - when)} ago` : "";
+    const verdict = row.synthetic ? DIM(" (watcher verdict)") : "";
+    const failure = row.failureKind ? RED(` ${row.failureKind}`) : "";
+    const meta = [dur, cost, ago].filter(Boolean).join(" · ");
+    const color = row.status === "failed" || row.status === "dead" ? RED : row.status === "lost" ? DIM : (s) => s;
+    lines.push(
+      color(` ${glyph} ${BOLD(row.name)} [${row.status}]${failure}${verdict} ${DIM(meta)}  ${DIM(path.basename(row.cwd ?? ""))}`.slice(0, width + 40)),
+    );
+  }
+  return lines;
+}
 
 function render() {
   const rows = process.stdout.rows || 24;
@@ -137,7 +171,8 @@ function render() {
       board = null;
     }
   }
-  console.log(`${BOLD(" Atomic workflows ")} ${DIM("(q close · j/k scroll)")}\n`);
+  const tabs = view === "history" ? "history — a: active runs" : "active — h: history";
+  console.log(`${BOLD(" Atomic workflows ")} ${DIM(`[${tabs}] (q close · j/k scroll)`)}\n`);
   if (!board) {
     console.log("  watcher state not found — is the watcher running?");
     console.log("  restart it via the plugin action: Restart workflow watcher");
@@ -151,12 +186,15 @@ function render() {
     age > 5
       ? RED(`⚠ watcher stale — last update ${age}s ago (right-click → Restart workflow watcher)`)
       : DIM(`watcher live · refreshed ${age}s ago`);
-  if (board.projects.length === 0) {
-    console.log(`  no active workflow runs\n\n  ${freshness}`);
+  const now = Date.now();
+  if (view === "active" && board.projects.length === 0) {
+    console.log(`  no active workflow runs ${DIM("(h: history)")}\n\n  ${freshness}`);
     return;
   }
-  const now = Date.now();
-  const body = board.projects.flatMap((p) => projectLines(p, now, width));
+  const body =
+    view === "history"
+      ? historyLines(now, width)
+      : board.projects.flatMap((p) => projectLines(p, now, width));
   lastBodyLen = body.length;
   const visible = Math.max(4, rows - 4);
   offset = Math.max(0, Math.min(offset, body.length - visible));
@@ -184,6 +222,8 @@ process.stdin.on("data", (key) => {
   else if (s === "k" || s === "\x1b[A") offset = Math.max(0, offset - 1);
   else if (s === "g") offset = 0;
   else if (s === "G") offset = Math.max(0, lastBodyLen - visible);
+  else if (s === "h" && view !== "history") { view = "history"; offset = 0; }
+  else if (s === "a" && view !== "active") { view = "active"; offset = 0; }
   else return;
   render();
 });
