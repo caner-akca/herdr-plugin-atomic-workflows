@@ -1,0 +1,9 @@
+# atomic agent local scratch (todos, session state) — never commit
+.atomic/
+
+# node artifacts (no deps today; guard for later)
+node_modules/
+
+# local logs / editor droppings
+*.log
+.DS_Store

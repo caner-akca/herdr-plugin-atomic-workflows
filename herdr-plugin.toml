@@ -1,0 +1,31 @@
+id = "atomic.workflows"
+name = "Atomic Workflows"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Show running atomic workflow status under agents in the herdr sidebar, with a popup board for details."
+platforms = ["linux", "macos"]
+
+# Long-lived watcher: polls agent panes, watches each project's
+# .atomic/workflows/status.json, reports $wf / $wf_stage metadata tokens.
+[[startup]]
+command = ["node", "bin/start-watcher.mjs"]
+
+[[actions]]
+id = "open-board"
+title = "Workflow board"
+contexts = ["workspace"]
+command = ["node", "bin/open-board.mjs"]
+
+[[actions]]
+id = "restart-watcher"
+title = "Restart workflow watcher"
+contexts = ["workspace"]
+command = ["node", "bin/start-watcher.mjs"]
+
+[[panes]]
+id = "board"
+title = "Workflows"
+placement = "popup"
+width = "80%"
+height = 24
+command = ["node", "bin/board.mjs"]
