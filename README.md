@@ -46,6 +46,9 @@ run name and current stage, and a popup board shows every run and stage.
 - Run any atomic workflow (`/workflow <name>` or the `workflow` tool) in a
   pane — within ~2 s the sidebar shows `run-name` and its current stage,
   including `needs input: <stage>` when a stage is waiting on you.
+- When a stage starts **waiting for input**, the watcher also fires a system
+  notification (`herdr notification show`, so it follows your `[ui.toast]`
+  delivery config) — one per stage, re-armed when the stage moves on.
 - Open the board: right-click → **Workflow board**, or:
 
   ```bash

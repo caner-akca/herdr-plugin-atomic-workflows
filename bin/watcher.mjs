@@ -96,6 +96,28 @@ function clear(paneId) {
 }
 
 const reported = new Set(); // pane ids currently carrying our tokens
+const notified = new Set(); // "runId:stage" keys already toasted while still awaiting input
+
+// System toast (routed through herdr's configured notification delivery) the
+// first tick a stage is seen awaiting input. Keys re-arm when the stage moves
+// on, so a later confirm in the same run notifies again. In-memory only: a
+// watcher restart re-toasts still-waiting stages once, which is a feature.
+function notifyAwaiting(cwd, activeRuns, awaitingNow) {
+  for (const run of activeRuns) {
+    for (const stage of run.stages ?? []) {
+      if (stage.status !== "awaiting_input") continue;
+      const key = `${run.id}:${stage.name}`;
+      awaitingNow.add(key);
+      if (notified.has(key)) continue;
+      notified.add(key);
+      herdr([
+        "notification", "show", "workflow needs input",
+        "--body", `${run.name}: ${stage.name} (${path.basename(cwd)})`,
+        "--sound", "request",
+      ]);
+    }
+  }
+}
 
 function tick() {
   const panes = agentPanes();
@@ -109,6 +131,7 @@ function tick() {
 
   const board = { updatedAt: Date.now(), projects: [] };
   const live = new Set();
+  const awaitingNow = new Set();
 
   for (const [cwd, cwdPanes] of byCwd) {
     const summary = summarize(readStatus(cwd));
@@ -128,7 +151,9 @@ function tick() {
       report(p.pane_id, summary.wf, summary.wfStage);
       live.add(p.pane_id);
     }
+    notifyAwaiting(cwd, summary.active, awaitingNow);
   }
+  for (const key of notified) if (!awaitingNow.has(key)) notified.delete(key);
 
   // Explicitly clear panes whose workflows just went quiet (faster than TTL).
   for (const paneId of reported) if (!live.has(paneId)) clear(paneId);
