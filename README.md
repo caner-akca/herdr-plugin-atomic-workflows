@@ -46,9 +46,19 @@ run name and current stage, and a popup board shows every run and stage.
 - Run any atomic workflow (`/workflow <name>` or the `workflow` tool) in a
   pane — within ~2 s the sidebar shows `run-name` and its current stage,
   including `needs input: <stage>` when a stage is waiting on you.
-- When a stage starts **waiting for input**, the watcher also fires a system
-  notification (`herdr notification show`, so it follows your `[ui.toast]`
-  delivery config) — one per stage, re-armed when the stage moves on.
+- When a stage starts **waiting for input**, the sidebar token, the board,
+  and a system notification (`herdr notification show`, following your
+  `[ui.toast]` delivery config) all carry the **actual question and choices**
+  from the stage's pending prompt — one toast per stage, re-armed when the
+  stage moves on.
+- The board shows per-stage elapsed time and model, failure details
+  (`failureKind/failureCode`, retry countdown, resumable), atomic notices,
+  and pending-stage counts. Scroll with `j`/`k` (or arrows), `g`/`G` to jump.
+- **Stale/dead detection:** atomic's status file has no heartbeat, and a
+  killed atomic leaves `status: "running"` on disk forever. While a run
+  claims to be actively executing, no status write for 45 s marks it
+  `(stale?)` and 5 min marks it `[dead?]` — paused and awaiting-input runs
+  are exempt (their silence is expected).
 - Open the board: right-click → **Workflow board**, or:
 
   ```bash
