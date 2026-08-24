@@ -34,9 +34,16 @@ function render() {
     console.log("  restart it via the plugin action: Restart workflow watcher");
     return;
   }
+  // Age of the watcher's last write, not a session timer: the watcher rewrites
+  // board.json every ~2s, so a healthy age oscillates 0-2s. Growth means the
+  // watcher is dead.
   const age = Math.round((Date.now() - board.updatedAt) / 1000);
+  const freshness =
+    age > 5
+      ? `\x1b[31m⚠ watcher stale — last update ${age}s ago (right-click → Restart workflow watcher)\x1b[0m`
+      : `\x1b[2mwatcher live · refreshed ${age}s ago\x1b[0m`;
   if (board.projects.length === 0) {
-    console.log(`  no active workflow runs (state ${age}s old)`);
+    console.log(`  no active workflow runs\n\n  ${freshness}`);
     return;
   }
   for (const project of board.projects) {
@@ -51,7 +58,7 @@ function render() {
     }
     console.log("");
   }
-  console.log(`  updated ${age}s ago`);
+  console.log(`  ${freshness}`);
 }
 
 render();

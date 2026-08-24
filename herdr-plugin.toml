@@ -1,6 +1,6 @@
 id = "atomic.workflows"
 name = "Atomic Workflows"
-version = "0.2.0"
+version = "0.2.1"
 min_herdr_version = "0.7.0"
 description = "Show running atomic workflow status under agents in the herdr sidebar, with a popup board for details."
 platforms = ["linux", "macos"]
