@@ -109,10 +109,12 @@ export function readHistory(limit = 100) {
     if (!e.runId) continue;
     let row = runs.get(e.runId);
     if (!row) {
-      row = { runId: e.runId, cwd: e.cwd, name: "?", status: "running", startedAt: null, endedAt: null, durationMs: null, usage: null, origin: null, synthetic: false };
+      row = { runId: e.runId, cwd: e.cwd, name: "?", status: "running", startedAt: null, endedAt: null, durationMs: null, usage: null, origin: null, synthetic: false, sessionFiles: [] };
       runs.set(e.runId, row);
     }
-    if (e.t === "run.start") {
+    if (e.t === "stage.end") {
+      if (e.sessionFile) row.sessionFiles.push(e.sessionFile);
+    } else if (e.t === "run.start") {
       row.name = e.name ?? row.name;
       row.startedAt = e.startedAt ?? row.startedAt;
       row.origin = e.origin ?? row.origin;

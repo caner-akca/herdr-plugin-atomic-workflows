@@ -66,7 +66,8 @@ run name and current stage, and a popup board shows every run and stage.
   atomic's `modelAttempts[].usage`) in the board, and a `$wf_cost` sidebar
   token. This data exists *only* in the live status file — nothing else
   records it.
-- **History:** press `h` on the board for the run ledger — every observed
+- **History:** press `h` on the board for the run ledger — rows link to
+  their transcripts with the same `[1]`-`[9]` digit keys as the active view — every observed
   run's outcome, duration, and final cost, journaled by the watcher to
   NDJSON under the plugin state dir (`ledger/*.ndjson`, greppable) before
   atomic's session-start wipe destroys it. Runs that vanish mid-flight are
@@ -95,6 +96,12 @@ run name and current stage, and a popup board shows every run and stage.
   `{type:"hello", protocol:1, paneId, sessionId, cwd}`, and executes
   `{type:"command", text:"/workflow …"}` messages via `pi.sendUserMessage`
   — reject any text not starting with `/workflow `.
+- **Event-driven core:** the watcher subscribes to herdr pane lifecycle
+  events over the socket and `fs.watch`es each project's workflows
+  directory, reacting to status changes in well under a second, with a 10 s
+  reconciliation pass as backstop (which also refreshes token TTLs). If the
+  event stream is unavailable it falls back to classic 2 s polling — the
+  board footer shows which mode is live (`events` / `polling`).
 - **Stale/dead detection:** atomic's status file has no heartbeat, and a
   killed atomic leaves `status: "running"` on disk forever. While a run
   claims to be actively executing, no status write for 45 s marks it

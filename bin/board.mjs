@@ -244,11 +244,15 @@ let view = "active"; // "active" | "history"
 // History rows come from the plugin's own NDJSON ledger — the only durable
 // record (atomic wipes status.json on session_start; cost exists nowhere
 // else). Synthetic statuses (lost/dead) are the watcher's verdicts.
-function historyLines(now, width) {
+function historyLines(now, width, targets) {
   const rows = readHistory(200);
   if (rows.length === 0) return [DIM("  no journaled runs yet — history fills in as workflows run")];
   const lines = [];
   for (const row of rows) {
+    // Deep link: prefer the run's rendered transcript, else the most recent
+    // journaled stage session file that still exists on disk.
+    const lastSession = [...(row.sessionFiles ?? [])].reverse().find((f) => existsSync(f));
+    const link = linkMark(targets, latestRunTranscript(row.runId) ?? lastSession ?? null);
     const glyph = GLYPH[row.status] ?? (row.status === "lost" || row.status === "dead" ? "?" : "·");
     const dur = Number.isFinite(row.durationMs) ? fmtDur(row.durationMs) : "";
     const cost = fmtCost(row.usage?.cost);
@@ -259,9 +263,10 @@ function historyLines(now, width) {
     const meta = [dur, cost, ago].filter(Boolean).join(" · ");
     const color = row.status === "failed" || row.status === "dead" ? RED : row.status === "lost" ? DIM : (s) => s;
     lines.push(
-      color(` ${glyph} ${BOLD(row.name)} [${row.status}]${failure}${verdict} ${DIM(meta)}  ${DIM(path.basename(row.cwd ?? ""))}`.slice(0, width + 40)),
+      color(` ${glyph} ${BOLD(row.name)} [${row.status}]${failure}${verdict} ${DIM(meta)}  ${DIM(path.basename(row.cwd ?? ""))}`.slice(0, width + 40)) + link,
     );
   }
+  if (targets.length) lines.push(DIM(`  [1-${targets.length}] open transcript in a new tab`));
   return lines;
 }
 
@@ -284,14 +289,15 @@ function render() {
     console.log("  restart it via the plugin action: Restart workflow watcher");
     return;
   }
-  // Age of the watcher's last write, not a session timer: the watcher rewrites
-  // board.json every ~2s, so a healthy age oscillates 0-2s. Growth means the
-  // watcher is dead.
+  // Age of the watcher's last write, not a session timer: event-driven mode
+  // reconciles every ~10s (plus instant event passes), polling mode every
+  // ~2s. Growth past 15s means the watcher is dead.
   const age = Math.round((Date.now() - board.updatedAt) / 1000);
+  const mode = board.mode === "events" ? "events" : "polling";
   const freshness =
-    age > 5
+    age > 15
       ? RED(`⚠ watcher stale — last update ${age}s ago (right-click → Restart workflow watcher)`)
-      : DIM(`watcher live · refreshed ${age}s ago`);
+      : DIM(`watcher live (${mode}) · refreshed ${age}s ago`);
   const now = Date.now();
   if (view === "active" && board.projects.length === 0) {
     console.log(`  no active workflow runs ${DIM("(h: history)")}\n\n  ${freshness}`);
@@ -299,7 +305,9 @@ function render() {
   }
   let body;
   if (view === "history") {
-    body = historyLines(now, width);
+    const targets = [];
+    body = historyLines(now, width, targets);
+    linkTargets = targets;
   } else {
     const targets = [];
     const runs = [];
@@ -342,7 +350,7 @@ process.stdin.on("data", (key) => {
   else if (s === "G") offset = Math.max(0, lastBodyLen - visible);
   else if (s === "h" && view !== "history") { view = "history"; offset = 0; }
   else if (s === "a" && view !== "active") { view = "active"; offset = 0; }
-  else if (view === "active" && s >= "1" && s <= "9" && linkTargets[Number(s) - 1]) {
+  else if (s >= "1" && s <= "9" && linkTargets[Number(s) - 1]) {
     openViewer(linkTargets[Number(s) - 1]);
     return;
   }

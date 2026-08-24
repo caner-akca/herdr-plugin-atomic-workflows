@@ -18,16 +18,19 @@
 // wipe can destroy it.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { appendEntry, loadIndex, saveIndex, usageOfRun, usageOfStage } from "./ledger.mjs";
 import { applyView, VIEW_MARKER } from "./set-view.mjs";
+import { subscribe } from "./herdr-socket.mjs";
 
 const HERDR = process.env.HERDR_BIN_PATH || "herdr";
 const STATE_DIR = process.env.HERDR_PLUGIN_STATE_DIR || "/tmp/atomic-workflows-plugin";
 const SOURCE = "plugin:atomic.workflows";
-const POLL_MS = 2000;
+const POLL_MS = 2000; // reconciliation cadence while the event stream is down
+const RECONCILE_MS = 10000; // cadence while events are flowing (also refreshes token TTLs)
+const DEBOUNCE_MS = 150;
 const TTL_MS = 15000; // > 2 poll intervals: refreshed continuously while alive
 // Liveness of the status file itself. Atomic writes it on every store
 // mutation but carries no heartbeat: a SIGKILLed atomic leaves
@@ -317,7 +320,47 @@ function ledgerTick(cwd, runs, live) {
   }
 }
 
-function tick() {
+let cachedByCwd = new Map();
+const dirWatchers = new Map(); // cwd -> fs watcher on <cwd>/.atomic/workflows
+
+// Watch each known project's workflows DIRECTORY (atomic writes status.json
+// by temp+rename, so the file inode changes — the directory is the stable
+// thing to watch). Errors drop the watcher; the next full pass recreates it.
+function updateDirWatchers(byCwd) {
+  for (const cwd of byCwd.keys()) {
+    if (dirWatchers.has(cwd)) continue;
+    const dir = path.join(cwd, ".atomic", "workflows");
+    if (!existsSync(dir)) continue;
+    try {
+      const watcher = watch(dir, () => scheduleQuick());
+      watcher.on("error", () => {
+        try {
+          watcher.close();
+        } catch {
+          // already closed
+        }
+        dirWatchers.delete(cwd);
+      });
+      dirWatchers.set(cwd, watcher);
+    } catch {
+      // dir vanished between check and watch; reconciliation retries
+    }
+  }
+  for (const [cwd, watcher] of dirWatchers) {
+    if (byCwd.has(cwd)) continue;
+    try {
+      watcher.close();
+    } catch {
+      // already closed
+    }
+    dirWatchers.delete(cwd);
+  }
+}
+
+// Full pass: re-list agent panes (the expensive part), refresh watchers,
+// then process. Quick pass: reprocess with the cached pane map — used for
+// sub-second reaction to a status.json write.
+function fullPass() {
   const panes = agentPanes();
   const byCwd = new Map();
   for (const p of panes) {
@@ -326,9 +369,18 @@ function tick() {
     if (!byCwd.has(cwd)) byCwd.set(cwd, []);
     byCwd.get(cwd).push(p);
   }
+  cachedByCwd = byCwd;
+  updateDirWatchers(byCwd);
+  processPanes(byCwd);
+}
 
+function quickPass() {
+  processPanes(cachedByCwd);
+}
+
+function processPanes(byCwd) {
   const now = Date.now();
-  const board = { updatedAt: now, projects: [] };
+  const board = { updatedAt: now, mode: eventsConnected ? "events" : "polling", projects: [] };
   const live = new Set();
   const awaitingNow = new Set();
   const wsAgg = new Map(); // workspace id -> {active, needy}
@@ -495,15 +547,53 @@ function startBridge() {
   server.listen(bridgePath);
 }
 
-setInterval(() => {
+// ── Scheduler ──────────────────────────────────────────────────────────────
+// herdr pane events and fs.watch hits coalesce through one debounced timer;
+// a full pass supersedes a queued quick pass. The reconciliation loop is the
+// backstop for missed events AND the thing that refreshes token TTLs and
+// re-evaluates wall-clock staleness — 10s while the event stream is up
+// (TTL is 15s), 2s (the classic poll) while it is down.
+let eventsConnected = false;
+let pendingTimer = null;
+let pendingFull = false;
+
+function schedulePass(full) {
+  if (full) pendingFull = true;
+  if (pendingTimer) return;
+  pendingTimer = setTimeout(() => {
+    pendingTimer = null;
+    const wasFull = pendingFull;
+    pendingFull = false;
+    try {
+      if (wasFull) fullPass();
+      else quickPass();
+    } catch {
+      // keep the daemon alive
+    }
+  }, DEBOUNCE_MS);
+}
+const scheduleQuick = () => schedulePass(false);
+
+function reconcileLoop() {
   try {
-    tick();
+    fullPass();
   } catch {
-    // keep the daemon alive; next tick retries
+    // keep the daemon alive; next pass retries
   }
-}, POLL_MS);
-tick();
+  setTimeout(reconcileLoop, eventsConnected ? RECONCILE_MS : POLL_MS);
+}
+
+reconcileLoop();
 startBridge();
+
+subscribe(
+  ["pane.created", "pane.closed", "pane.exited", "pane.agent_detected"].map((type) => ({ type })),
+  () => schedulePass(true),
+  (state) => {
+    eventsConnected = state === "connected";
+    schedulePass(true);
+  },
+);
 
 // The workflows-only agent view is transient (dies with the herdr server):
 // if the user had it on, reapply it every watcher start. Fail soft.
