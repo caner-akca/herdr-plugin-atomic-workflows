@@ -83,6 +83,18 @@ run name and current stage, and a popup board shows every run and stage.
   digit to open the file in a viewer tab (session `.jsonl` files are
   rendered entry-by-entry; `q` closes). Note: atomic prunes run artifacts
   after ~30 days.
+- **Control verbs (dormant):** the board has a run cursor (`n`/Tab) and
+  `p`/`r`/`i`/`Q` pause/resume/interrupt/quit keys, wired to a local bridge
+  socket the watcher hosts. Actually delivering a verb needs an optional
+  atomic extension that is **deliberately not bundled** (it would execute
+  commands inside your atomic sessions — a trust decision each user should
+  make by hand). Without it, verbs answer "no atomic bridge for this
+  project" and nothing else changes. See `bin/install-extension.mjs` and
+  the bridge protocol in `bin/watcher.mjs` if you want to build and audit
+  your own: an extension connects to `<state-dir>/bridge.sock`, sends
+  `{type:"hello", protocol:1, paneId, sessionId, cwd}`, and executes
+  `{type:"command", text:"/workflow …"}` messages via `pi.sendUserMessage`
+  — reject any text not starting with `/workflow `.
 - **Stale/dead detection:** atomic's status file has no heartbeat, and a
   killed atomic leaves `status: "running"` on disk forever. While a run
   claims to be actively executing, no status write for 45 s marks it
