@@ -3,14 +3,19 @@
 // timing, models, prompts, and failure details.
 // q / esc / ctrl+c closes; j/k or arrows scroll; g/G jump.
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { fmtCost, stagePrompt, tasksForWorkspace } from "./display.mjs";
+import { STATE_DIR } from "./plugin-state.mjs";
 import { readHistory, usageOfRun, usageOfStage } from "./ledger.mjs";
+import { focusTask, launchSelectedIssues, launchSelectedReviews } from "./task-launcher.mjs";
+import { readCampaign } from "./task-store.mjs";
 
 const HERDR = process.env.HERDR_BIN_PATH || "herdr";
+const GH = process.env.GH_BIN_PATH || "gh";
+const WORKSPACE_ID = process.env.HERDR_WORKSPACE_ID || "";
 const RUNS_ROOT = path.join(
   process.env.ATOMIC_WORKFLOW_ARTIFACT_DIR || path.join(os.homedir(), ".atomic", "workflows"),
   "runs",
@@ -21,65 +26,105 @@ const RUNS_ROOT = path.join(
 // viewer pane (new tab) via `herdr plugin pane open`.
 let linkTargets = [];
 
-// ── Control verbs (need the optional atomic integration installed) ────────
-// Selected run gets a ▸ cursor (n cycles); p/r/i/Q send pause/resume/
-// interrupt/quit through the watcher's bridge socket to the atomic session
-// owning that project. Destructive verbs ask for the key twice.
-let controlRuns = []; // {runId, name, cwd, status} in render order
-let selIdx = 0;
-let pendingVerb = null; // {verb, runId, until}
 let statusMsg = "";
+let taskRows = []; // queue issue rows and durable task rows in render order
+let taskCursor = 0;
+const selectedIssues = new Set();
+const selectedReviews = new Set();
+const prCache = new Map();
+const prErrors = new Map();
+const prLoading = new Set();
+const PR_CACHE_TTL_MS = 30_000;
+const PR_FETCH_TIMEOUT_MS = 2_000;
+let reviewRepoRoot = null;
+let taskList = "issues";
+let selectionCampaignId = null;
 
-const BRIDGE_PATH = path.join(
-  process.env.HERDR_PLUGIN_STATE_DIR || "/tmp/atomic-workflows-plugin",
-  "bridge.sock",
-);
+function launchIssues(campaignId, issues) {
+  try {
+    const launched = launchSelectedIssues(readCampaign(campaignId), issues);
+    const created = launched.filter(({ existing }) => !existing).length;
+    const reused = launched.length - created;
+    selectedIssues.clear();
+    statusMsg = `launched ${created} task${created === 1 ? "" : "s"}${reused ? ` · reused ${reused}` : ""}`;
+  } catch (error) {
+    statusMsg = `launch: ✗ ${error instanceof Error ? error.message : String(error)}`;
+  }
+  render();
+}
 
-function sendControl(verb, run) {
-  const id = `board:${Date.now()}:${Math.floor(Math.random() * 1e6)}`;
-  const sock = net.createConnection(BRIDGE_PATH);
-  let buf = "";
-  const done = (msg) => {
-    statusMsg = msg;
-    sock.destroy();
-    render();
+function launchReviews(campaignId, prs) {
+  try {
+    const launched = launchSelectedReviews(readCampaign(campaignId), prs);
+    const created = launched.filter(({ existing }) => !existing).length;
+    const reused = launched.length - created;
+    selectedReviews.clear();
+    statusMsg = `launched ${created} review${created === 1 ? "" : "s"}${reused ? ` · reused ${reused}` : ""}`;
+  } catch (error) {
+    statusMsg = `launch: ✗ ${error instanceof Error ? error.message : String(error)}`;
+  }
+  render();
+}
+function pullRequests(repoRoot) {
+  const cached = prCache.get(repoRoot);
+  return {
+    prs: cached?.prs ?? [],
+    error: prErrors.get(repoRoot) ?? "",
+    loading: prLoading.has(repoRoot),
+    fetchedAt: cached?.fetchedAt ?? 0,
   };
-  const timer = setTimeout(() => done(`${verb}: watcher not answering`), 7000);
-  sock.on("error", () => {
-    clearTimeout(timer);
-    done(`${verb}: bridge socket unavailable — is the watcher running?`);
+}
+
+function refreshPullRequests(repoRoot, { force = false } = {}) {
+  if (!repoRoot || prLoading.has(repoRoot)) return;
+  const cached = prCache.get(repoRoot);
+  if (!force && cached && Date.now() - cached.fetchedAt < PR_CACHE_TTL_MS) return;
+
+  prLoading.add(repoRoot);
+  prErrors.delete(repoRoot);
+  const child = spawn(GH, ["pr", "list", "--json", "number,title,author,isDraft", "--limit", "20"], {
+    cwd: repoRoot,
+    stdio: ["ignore", "pipe", "pipe"],
   });
-  sock.on("connect", () =>
-    sock.write(`${JSON.stringify({ type: "control", id, verb, runId: run.runId, cwd: run.cwd })}\n`),
-  );
-  sock.on("data", (chunk) => {
-    buf += chunk;
-    const nl = buf.indexOf("\n");
-    if (nl < 0) return;
-    clearTimeout(timer);
+  let stdout = "";
+  let stderr = "";
+  let finished = false;
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const timeout = setTimeout(() => child.kill(), PR_FETCH_TIMEOUT_MS);
+
+  function finish({ prs, error = "" }) {
+    if (finished) return;
+    finished = true;
+    clearTimeout(timeout);
+    prLoading.delete(repoRoot);
+    if (error) {
+      // Errors are display state, never cache entries: pressing p can retry.
+      prCache.delete(repoRoot);
+      prErrors.set(repoRoot, error);
+    } else {
+      prErrors.delete(repoRoot);
+      prCache.set(repoRoot, { prs, fetchedAt: Date.now() });
+    }
+    render();
+  }
+  child.on("error", (error) => finish({ prs: [], error: error.message }));
+  child.on("close", (code, signal) => {
+    if (code !== 0) {
+      const reason = signal ? `gh pr list timed out after ${PR_FETCH_TIMEOUT_MS}ms` : stderr.trim() || "could not list PRs";
+      finish({ prs: [], error: reason });
+      return;
+    }
     try {
-      const msg = JSON.parse(buf.slice(0, nl));
-      done(`${verb} ${run.name}: ${msg.ok ? "✓ " : "✗ "}${msg.message}`);
-    } catch {
-      done(`${verb}: bad bridge reply`);
+      const prs = JSON.parse(stdout || "[]");
+      if (!Array.isArray(prs)) throw new Error("gh pr list returned a non-array result");
+      finish({ prs });
+    } catch (error) {
+      finish({ prs: [], error: error instanceof Error ? error.message : String(error) });
     }
   });
 }
 
-function requestVerb(verb, destructive) {
-  const run = controlRuns[selIdx];
-  if (!run) return;
-  if (destructive && !(pendingVerb?.verb === verb && pendingVerb.runId === run.runId && Date.now() < pendingVerb.until)) {
-    pendingVerb = { verb, runId: run.runId, until: Date.now() + 3000 };
-    statusMsg = `press ${verb === "quit" ? "Q" : "i"} again to confirm ${verb} of ${run.name}`;
-    render();
-    return;
-  }
-  pendingVerb = null;
-  statusMsg = `${verb} ${run.name}…`;
-  render();
-  sendControl(verb, run);
-}
 
 function latestRunTranscript(runId) {
   const dir = path.join(RUNS_ROOT, String(runId).replace(/[^A-Za-z0-9._-]/g, "_"), "transcripts");
@@ -108,7 +153,6 @@ function openViewer(file) {
   ], { timeout: 10000 });
 }
 
-const STATE_DIR = process.env.HERDR_PLUGIN_STATE_DIR || "/tmp/atomic-workflows-plugin";
 const boardPath = path.join(STATE_DIR, "board.json");
 
 const GLYPH = {
@@ -122,6 +166,12 @@ const GLYPH = {
   killed: "✗",
   cancelled: "✗",
   skipped: "-",
+  launching: "…",
+  "launch-failed": "✗",
+  "needs-input": "?",
+  "pane-gone": "○",
+  stale: "?",
+  dead: "✗",
 };
 
 const DIM = (s) => `\x1b[2m${s}\x1b[0m`;
@@ -142,10 +192,6 @@ function fmtModel(model) {
   return model.includes("/") ? model.split("/").pop() : model;
 }
 
-function fmtCost(cost) {
-  if (!Number.isFinite(cost) || cost <= 0) return "";
-  return cost >= 10 ? `$${cost.toFixed(0)}` : `$${cost.toFixed(2)}`;
-}
 
 // Elapsed for a run/stage: final duration when ended, wall-clock since start
 // while live (atomic's own duration fields are authoritative once present).
@@ -155,19 +201,6 @@ function elapsed(x, now) {
   return NaN;
 }
 
-function stagePrompt(stage, run) {
-  const p = stage?.pendingPrompt ?? run?.pendingPrompt;
-  if (p?.message) return { kind: p.kind ?? "input", message: p.message, choices: p.choices ?? [] };
-  const q = stage?.inputRequest?.questions?.[0];
-  if (q?.question) {
-    return {
-      kind: stage.inputRequest.kind ?? "ask_user_question",
-      message: q.question,
-      choices: (q.options ?? []).map((o) => o.label).filter(Boolean),
-    };
-  }
-  return null;
-}
 
 function failureLine(x) {
   const bits = [];
@@ -178,7 +211,7 @@ function failureLine(x) {
   return bits.length ? bits.join(" · ") : null;
 }
 
-function projectLines(project, now, width, targets, runsOut) {
+function projectLines(project, now, width, targets) {
   const lines = [];
   lines.push(`${BOLD(` ${path.basename(project.cwd)}`)}  ${DIM(project.cwd)}`);
   lines.push(DIM(`   panes: ${project.panes.join(", ")}`));
@@ -197,10 +230,7 @@ function projectLines(project, now, width, targets, runsOut) {
     const usage = usageOfRun(run);
     const cost = usage.cost > 0 ? DIM(` · ${fmtCost(usage.cost)} · ${usage.turns} turns`) : "";
     const runLink = linkMark(targets, latestRunTranscript(run.id));
-    const runIdx = runsOut.length;
-    runsOut.push({ runId: run.id, name: run.name, cwd: project.cwd, status: run.status });
-    const cursor = runIdx === selIdx ? "▸" : " ";
-    lines.push(` ${cursor} ${GLYPH[run.status] ?? "?"} ${BOLD(run.name)} [${run.status}] ${DIM(dur)}${cost}${origin}${runLink}`);
+    lines.push(`   ${GLYPH[run.status] ?? "?"} ${BOLD(run.name)} [${run.status}] ${DIM(dur)}${cost}${origin}${runLink}`);
     const runFailed =
       run.failureKind || run.error || ["failed", "blocked", "killed", "cancelled"].includes(run.status);
     const runFailure = runFailed ? failureLine(run) : null;
@@ -239,7 +269,110 @@ function projectLines(project, now, width, targets, runsOut) {
 
 let offset = 0;
 let lastBodyLen = 0;
-let view = "active"; // "active" | "history"
+let view = "tasks"; // "tasks" | "active" | "history"
+
+function shortlistIssue(item) {
+  return Number(item?.issue);
+}
+
+function recommended(item) {
+  if (item?.recommended === true) return true;
+  return /^(fix|fix-now|proceed|recommended|actionable|yes)$/i.test(String(item?.recommendation ?? "").trim());
+}
+
+function taskLines(board, width) {
+  const lines = [];
+  const rows = [];
+  const tasks = tasksForWorkspace(board.tasks ?? [], WORKSPACE_ID)
+    .sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0));
+  const ranking = tasks.find((task) => task.kind === "issue-queue");
+  const queue = ranking?.shortlist?.length ? ranking : null;
+  const managedTasks = tasks.filter((task) => task.kind === "issue-fix" || task.kind === "code-review");
+  const reviewContext = ranking ?? tasks.find((task) => task.campaign_id && task.repo_root);
+  reviewRepoRoot = reviewContext?.repo_root ?? null;
+  const reviewList = taskList === "reviews" && reviewContext ? pullRequests(reviewContext.repo_root) : { prs: [], error: "", loading: false };
+  const candidateCount = taskList === "reviews"
+    ? reviewList.prs.filter((pr) => Number.isInteger(Number(pr.number))).length
+    : (queue?.shortlist ?? []).filter((item) => Number.isInteger(shortlistIssue(item))).length;
+  if (taskCursor >= candidateCount + managedTasks.length) taskCursor = Math.max(0, candidateCount + managedTasks.length - 1);
+
+  if (taskList === "reviews") {
+    lines.push(`${BOLD(" Open pull requests")} ${DIM("(p issues · space select · enter launch)")}`);
+    if (!reviewContext) {
+      lines.push(DIM("   start an issue campaign to establish the workspace repository"));
+    } else if (reviewList.loading && reviewList.prs.length === 0) {
+      lines.push(DIM("   loading open pull requests…"));
+    } else if (reviewList.error) {
+      lines.push(YELLOW(`   could not list PRs: ${reviewList.error}`));
+    } else if (reviewList.prs.length === 0) {
+      lines.push(DIM("   no open pull requests"));
+    } else {
+      const allowed = new Set(reviewList.prs.map((pr) => Number(pr.number)).filter(Number.isInteger));
+      for (const pr of selectedReviews) if (!allowed.has(pr)) selectedReviews.delete(pr);
+      for (const item of reviewList.prs) {
+        const pr = Number(item.number);
+        if (!Number.isInteger(pr)) continue;
+        const row = { type: "review", campaignId: reviewContext.campaign_id, pr, line: lines.length };
+        const cursor = rows.length === taskCursor ? "▸" : " ";
+        const checked = selectedReviews.has(pr) ? "x" : " ";
+        const author = item.author?.login ? ` · @${item.author.login}` : "";
+        const draft = item.isDraft ? " · draft" : "";
+        const title = String(item.title ?? "").slice(0, Math.max(10, width - 32));
+        lines.push(`${cursor} [${checked}] PR #${pr}${draft}${author}  ${title}`);
+        rows.push(row);
+      }
+    }
+    lines.push("");
+  } else if (queue) {
+    if (selectionCampaignId !== queue.campaign_id) {
+      selectedIssues.clear();
+      selectionCampaignId = queue.campaign_id;
+    }
+    const allowedIssues = new Set(queue.shortlist.map(shortlistIssue).filter(Number.isInteger));
+    for (const issue of selectedIssues) if (!allowedIssues.has(issue)) selectedIssues.delete(issue);
+    lines.push(`${BOLD(" Issue shortlist")} ${DIM("(p reviews · space select · a recommended · enter launch)")}`);
+    for (const item of queue.shortlist) {
+      const issue = shortlistIssue(item);
+      if (!Number.isInteger(issue)) continue;
+      const row = { type: "issue", campaignId: queue.campaign_id, issue, item, line: lines.length };
+      const cursor = rows.length === taskCursor ? "▸" : " ";
+      const checked = selectedIssues.has(issue) ? "x" : " ";
+      const score = Number.isFinite(Number(item.score)) ? ` ${Number(item.score).toFixed(1)}` : "";
+      const tag = item.recommendation ? ` · ${item.recommendation}` : "";
+      const os = Array.isArray(item.os) ? item.os.join("/") : Array.isArray(item.affected_platforms) ? item.affected_platforms.join("/") : "";
+      const title = String(item.title ?? "").slice(0, Math.max(10, width - 38));
+      lines.push(`${cursor} [${checked}] #${issue}${score}${tag}${os ? ` · ${os}` : ""}  ${title}`);
+      rows.push(row);
+    }
+    lines.push("");
+  } else if (ranking) {
+    lines.push(`${BOLD(" Issue shortlist")}  ${GLYPH[ranking.status] ?? "·"} ${ranking.phase ?? ranking.status}`);
+    if (ranking.attention) lines.push(YELLOW(`   ${ranking.attention}`));
+    lines.push("");
+  }
+
+  lines.push(BOLD(" Tasks"));
+  if (managedTasks.length === 0) {
+    lines.push(DIM("   no managed tasks yet"));
+  } else {
+    for (const task of managedTasks) {
+      const row = { type: "task", task, line: lines.length };
+      const cursor = rows.length === taskCursor ? "▸" : " ";
+      const glyph = GLYPH[task.status] ?? "·";
+      const cost = fmtCost(task.cost);
+      const meta = [task.phase ?? task.status, task.progress, cost].filter(Boolean).join(" · ");
+      lines.push(`${cursor} ${glyph} ${BOLD(task.title ?? `#${task.target}`)}  ${DIM(meta)}`);
+      if (task.attention) lines.push(YELLOW(`     ${String(task.attention).slice(0, Math.max(20, width - 7))}`));
+      rows.push(row);
+    }
+  }
+  if (!ranking && managedTasks.length === 0) lines.push("", DIM("  Start with the “Start issue campaign” plugin action."));
+  if (rows.length) lines.push("", DIM("  enter: launch selected items / focus task · x: clear selection"));
+  if (statusMsg) lines.push(`  ${YELLOW(statusMsg)}`);
+  taskRows = rows;
+  if (taskCursor >= rows.length) taskCursor = Math.max(0, rows.length - 1);
+  return lines;
+}
 
 // History rows come from the plugin's own NDJSON ledger — the only durable
 // record (atomic wipes status.json on session_start; cost exists nowhere
@@ -282,7 +415,12 @@ function render() {
       board = null;
     }
   }
-  const tabs = view === "history" ? "history — a: active runs" : "active — h: history";
+  const tabs =
+    view === "tasks"
+      ? "tasks — l: legacy runs · h: history"
+      : view === "history"
+        ? "history — b: tasks · l: legacy runs"
+        : "legacy runs — b: tasks · h: history";
   console.log(`${BOLD(" Atomic workflows ")} ${DIM(`[${tabs}] (q close · j/k scroll)`)}\n`);
   if (!board) {
     console.log("  watcher state not found — is the watcher running?");
@@ -299,30 +437,31 @@ function render() {
       ? RED(`⚠ watcher stale — last update ${age}s ago (right-click → Restart workflow watcher)`)
       : DIM(`watcher live (${mode}) · refreshed ${age}s ago`);
   const now = Date.now();
-  if (view === "active" && board.projects.length === 0) {
-    console.log(`  no active workflow runs ${DIM("(h: history)")}\n\n  ${freshness}`);
-    return;
-  }
   let body;
   if (view === "history") {
     const targets = [];
     body = historyLines(now, width, targets);
     linkTargets = targets;
-  } else {
+  } else if (view === "active") {
     const targets = [];
-    const runs = [];
-    body = board.projects.flatMap((p) => projectLines(p, now, width, targets, runs));
+    body = (board.projects ?? []).flatMap((p) => projectLines(p, now, width, targets));
+    if (body.length === 0) body.push(DIM("  no active legacy workflow runs"));
     linkTargets = targets;
-    controlRuns = runs;
-    if (selIdx >= runs.length) selIdx = 0;
     const hints = [];
     if (targets.length) hints.push(`[1-${targets.length}] transcript`);
-    if (runs.length) hints.push("n select · p/r pause/resume · i/Q interrupt/quit");
     if (hints.length) body.push(DIM(`  ${hints.join(" · ")}`));
     if (statusMsg) body.push(`  ${YELLOW(statusMsg)}`);
+  } else {
+    linkTargets = [];
+    body = taskLines(board, width);
   }
   lastBodyLen = body.length;
   const visible = Math.max(4, rows - 4);
+  if (view === "tasks" && taskRows[taskCursor]) {
+    const cursorLine = taskRows[taskCursor].line;
+    if (cursorLine < offset) offset = cursorLine;
+    else if (cursorLine >= offset + visible) offset = cursorLine - visible + 1;
+  }
   offset = Math.max(0, Math.min(offset, body.length - visible));
   const slice = body.slice(offset, offset + visible);
   for (const line of slice) console.log(line);
@@ -332,8 +471,12 @@ function render() {
 }
 
 render();
-const timer = setInterval(render, 1000);
-
+const timer = setInterval(() => {
+  if (view === "tasks" && taskList === "reviews" && !prErrors.has(reviewRepoRoot)) {
+    refreshPullRequests(reviewRepoRoot);
+  }
+  render();
+}, 1000);
 process.stdin.setRawMode?.(true);
 process.stdin.resume();
 process.stdin.on("data", (key) => {
@@ -344,24 +487,74 @@ process.stdin.on("data", (key) => {
     process.exit(0);
   }
   const visible = Math.max(4, (process.stdout.rows || 24) - 4);
-  if (s === "j" || s === "\x1b[B") offset += 1;
+  if ((s === "j" || s === "\x1b[B") && view === "tasks" && taskRows.length) {
+    taskCursor = Math.min(taskRows.length - 1, taskCursor + 1);
+  }
+  else if ((s === "k" || s === "\x1b[A") && view === "tasks" && taskRows.length) {
+    taskCursor = Math.max(0, taskCursor - 1);
+  }
+  else if (s === "j" || s === "\x1b[B") offset += 1;
   else if (s === "k" || s === "\x1b[A") offset = Math.max(0, offset - 1);
   else if (s === "g") offset = 0;
   else if (s === "G") offset = Math.max(0, lastBodyLen - visible);
   else if (s === "h" && view !== "history") { view = "history"; offset = 0; }
-  else if (s === "a" && view !== "active") { view = "active"; offset = 0; }
+  else if (s === "b" && view !== "tasks") { view = "tasks"; offset = 0; }
+  else if (s === "l" && view !== "active") { view = "active"; offset = 0; }
+  else if (view === "tasks" && s === "p") {
+    taskList = taskList === "issues" ? "reviews" : "issues";
+    taskCursor = 0;
+    offset = 0;
+    statusMsg = "";
+    if (taskList === "reviews") refreshPullRequests(reviewRepoRoot, { force: true });
+  }
+  else if (view === "tasks" && s === " " && taskRows[taskCursor]?.type === "issue") {
+    const issue = taskRows[taskCursor].issue;
+    if (selectedIssues.has(issue)) selectedIssues.delete(issue);
+    else if (selectedIssues.size < 5) selectedIssues.add(issue);
+    else statusMsg = "campaign launch limit is 5 tasks";
+  }
+  else if (view === "tasks" && s === " " && taskRows[taskCursor]?.type === "review") {
+    const pr = taskRows[taskCursor].pr;
+    if (selectedReviews.has(pr)) selectedReviews.delete(pr);
+    else if (selectedReviews.size < 5) selectedReviews.add(pr);
+    else statusMsg = "campaign launch limit is 5 tasks";
+  }
+  else if (view === "tasks" && s === "a") {
+    for (const row of taskRows) {
+      if (selectedIssues.size >= 5) break;
+      if (row.type === "issue" && recommended(row.item)) selectedIssues.add(row.issue);
+    }
+    statusMsg = selectedIssues.size === 5 ? "selected the first 5 recommended issues" : "selected recommended issues";
+  }
+  else if (view === "tasks" && s === "x") {
+    if (taskList === "reviews") selectedReviews.clear();
+    else selectedIssues.clear();
+    statusMsg = "selection cleared";
+  }
+  else if (view === "tasks" && (s === "\r" || s === "\n") && taskRows[taskCursor]) {
+    const row = taskRows[taskCursor];
+    if (row.type === "task") {
+      statusMsg = focusTask(row.task) ? `focused ${row.task.title}` : row.task.pane_id ? `could not focus ${row.task.title}` : "task pane is not available";
+      render();
+      return;
+    }
+    if (row.type === "review") {
+      if (selectedReviews.size === 0) selectedReviews.add(row.pr);
+      statusMsg = `launching ${selectedReviews.size} review${selectedReviews.size === 1 ? "" : "s"}…`;
+      render();
+      launchReviews(row.campaignId, [...selectedReviews]);
+      return;
+    }
+    if (selectedIssues.size === 0) selectedIssues.add(row.issue);
+    statusMsg = `launching ${selectedIssues.size} issue task${selectedIssues.size === 1 ? "" : "s"}…`;
+    render();
+    launchIssues(row.campaignId, [...selectedIssues]);
+    return;
+  }
   else if (s >= "1" && s <= "9" && linkTargets[Number(s) - 1]) {
     openViewer(linkTargets[Number(s) - 1]);
     return;
   }
-  else if (view === "active" && (s === "n" || s === "\t") && controlRuns.length) {
-    selIdx = (selIdx + 1) % controlRuns.length;
-    pendingVerb = null;
-  }
-  else if (view === "active" && s === "p") { requestVerb("pause", false); return; }
-  else if (view === "active" && s === "r") { requestVerb("resume", false); return; }
-  else if (view === "active" && s === "i") { requestVerb("interrupt", true); return; }
-  else if (view === "active" && s === "Q") { requestVerb("quit", true); return; }
   else return;
   render();
 });

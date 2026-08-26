@@ -7,8 +7,8 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { request } from "./herdr-socket.mjs";
+import { STATE_DIR } from "./plugin-state.mjs";
 
-const STATE_DIR = process.env.HERDR_PLUGIN_STATE_DIR || "/tmp/atomic-workflows-plugin";
 const SOURCE = "plugin:atomic.workflows";
 export const VIEW_MARKER = path.join(STATE_DIR, "view-on");
 

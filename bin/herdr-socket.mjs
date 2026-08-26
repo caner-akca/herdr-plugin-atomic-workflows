@@ -7,7 +7,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
-export function socketPath() {
+function socketPath() {
   return (
     process.env.HERDR_SOCKET_PATH ||
     path.join(os.homedir(), ".config", "herdr", "herdr.sock")

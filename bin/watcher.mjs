@@ -1,10 +1,18 @@
 #!/usr/bin/env node
 // Long-running watcher daemon (spawned detached by start-watcher.mjs).
 //
-// Loop: list herdr agent panes -> group by cwd -> read each cwd's
-// .atomic/workflows/status.json (written atomically by atomic when the
-// workflow extension has { "statusFile": true }) -> fold active runs into
-// short metadata tokens per pane:
+// Loop: load durable task manifests -> read each task-private
+// .atomic/workflows/status.json -> reduce that exact task/run into short
+// metadata tokens for its bound pane. Manually started sessions keep a
+// compatibility path, but only when one pane owns a cwd.
+//
+// Managed tokens:
+//   task      = issue/queue label
+//   phase     = deterministic Atomic run/stage state
+//   progress  = completed stages / total stages
+//   attention = pending question, if any
+//
+// Legacy compatibility tokens:
 //   wf       = "<name>" or "N runs | <name>"
 //   wf_stage = current running/awaiting stage (with the prompt text when
 //              a stage awaits input, and a stale/dead marker when the
@@ -18,29 +26,31 @@
 // wipe can destroy it.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
-import net from "node:net";
+import { existsSync, mkdirSync, readFileSync, statSync, watch } from "node:fs";
 import path from "node:path";
+import { fmtCost, stagePrompt, taskLabel } from "./display.mjs";
+import { STATE_DIR } from "./plugin-state.mjs";
 import { appendEntry, loadIndex, saveIndex, usageOfRun, usageOfStage } from "./ledger.mjs";
 import { applyView, VIEW_MARKER } from "./set-view.mjs";
 import { subscribe } from "./herdr-socket.mjs";
+import {
+  atomicWriteJson,
+  isTerminalTask,
+  listTasks,
+  readCampaign,
+  updateCampaign,
+  updateTask,
+} from "./task-store.mjs";
+import { liveness, reduceTask, taskSummary } from "./task-reducer.mjs";
 
 const HERDR = process.env.HERDR_BIN_PATH || "herdr";
-const STATE_DIR = process.env.HERDR_PLUGIN_STATE_DIR || "/tmp/atomic-workflows-plugin";
 const SOURCE = "plugin:atomic.workflows";
 const POLL_MS = 2000; // reconciliation cadence while the event stream is down
 const RECONCILE_MS = 10000; // cadence while events are flowing (also refreshes token TTLs)
 const DEBOUNCE_MS = 150;
 const TTL_MS = 15000; // > 2 poll intervals: refreshed continuously while alive
-// Liveness of the status file itself. Atomic writes it on every store
-// mutation but carries no heartbeat: a SIGKILLed atomic leaves
-// status:"running" on disk forever, so file age is the only staleness
-// signal. Thresholds are generous because a long silent LLM turn can
-// legitimately go quiet for a while.
-const STALE_MS = 45_000;
-const DEAD_MS = 300_000;
-const ACTIVE = new Set(["pending", "running", "paused", "blocked"]);
-const RUN_TERMINAL = new Set(["completed", "failed", "killed", "cancelled"]);
+const ACTIVE = new Set(["pending", "running", "paused"]);
+const RUN_TERMINAL = new Set(["completed", "skipped", "failed", "blocked", "killed", "cancelled"]);
 const STAGE_TERMINAL = new Set(["completed", "failed", "skipped"]);
 
 mkdirSync(STATE_DIR, { recursive: true });
@@ -62,6 +72,16 @@ function agentPanes() {
   }
 }
 
+function allPanes() {
+  const out = herdr(["pane", "list"]);
+  if (!out) return null;
+  try {
+    return JSON.parse(out).result.panes ?? [];
+  } catch {
+    return null;
+  }
+}
+
 function readStatus(cwd) {
   const file = path.join(cwd, ".atomic", "workflows", "status.json");
   if (!existsSync(file)) return null;
@@ -74,11 +94,6 @@ function readStatus(cwd) {
   }
 }
 
-function liveness(ageMs) {
-  if (ageMs > DEAD_MS) return "dead";
-  if (ageMs > STALE_MS) return "stale";
-  return "fresh";
-}
 
 function activeStage(run) {
   const stages = run.stages ?? [];
@@ -89,27 +104,6 @@ function activeStage(run) {
   );
 }
 
-// The question a stage is actually asking, from pendingPrompt (kinds
-// input|confirm|select|editor) or inputRequest (ask_user_question /
-// readiness_gate). Falls back to the run-level pendingPrompt.
-function stagePrompt(stage, run) {
-  const p = stage?.pendingPrompt ?? run?.pendingPrompt;
-  if (p?.message) return { kind: p.kind ?? "input", message: p.message, choices: p.choices ?? [] };
-  const q = stage?.inputRequest?.questions?.[0];
-  if (q?.question) {
-    return {
-      kind: stage.inputRequest.kind ?? "ask_user_question",
-      message: q.question,
-      choices: (q.options ?? []).map((o) => o.label).filter(Boolean),
-    };
-  }
-  return null;
-}
-
-function fmtCost(cost) {
-  if (!Number.isFinite(cost) || cost <= 0) return "";
-  return cost >= 10 ? `$${cost.toFixed(0)}` : `$${cost.toFixed(2)}`;
-}
 
 function summarize(snapshot, statusAgeMs) {
   const active = (snapshot?.runs ?? []).filter((r) => ACTIVE.has(r.status));
@@ -162,6 +156,24 @@ function report(paneId, summary) {
   ]);
 }
 
+function reportTask(paneId, task) {
+  const label = taskLabel(task);
+  const attention = task.attention ? `INPUT: ${task.attention}` : "";
+  herdr([
+    "pane", "report-metadata", paneId,
+    "--source", SOURCE,
+    "--token", `task=${label}`,
+    "--token", `phase=${String(task.phase ?? task.status).slice(0, 78)}`,
+    "--token", `progress=${task.progress ?? ""}`,
+    "--token", `attention=${attention.slice(0, 78)}`,
+    // Keep the existing tokens useful for configurations from v0.7.
+    "--token", `wf=${label}`,
+    "--token", `wf_stage=${attention ? attention.slice(0, 78) : String(task.phase ?? task.status).slice(0, 78)}`,
+    "--token", `wf_cost=${fmtCost(task.cost)}`,
+    "--ttl-ms", String(TTL_MS),
+  ]);
+}
+
 function clear(paneId) {
   herdr([
     "pane", "report-metadata", paneId,
@@ -169,6 +181,10 @@ function clear(paneId) {
     "--clear-token", "wf",
     "--clear-token", "wf_stage",
     "--clear-token", "wf_cost",
+    "--clear-token", "task",
+    "--clear-token", "phase",
+    "--clear-token", "progress",
+    "--clear-token", "attention",
   ]);
 }
 
@@ -321,6 +337,7 @@ function ledgerTick(cwd, runs, live) {
 }
 
 let cachedByCwd = new Map();
+let cachedPaneIds = null;
 const dirWatchers = new Map(); // cwd -> fs watcher on <cwd>/.atomic/workflows
 
 // Watch each known project's workflows DIRECTORY (atomic writes status.json
@@ -362,30 +379,82 @@ function updateDirWatchers(byCwd) {
 // sub-second reaction to a status.json write.
 function fullPass() {
   const panes = agentPanes();
+  const tasks = listTasks();
+  const managedPaneIds = new Set(tasks.map((task) => task.pane_id).filter(Boolean));
+  const managedProjectDirs = new Set(tasks.map((task) => task.project_dir));
   const byCwd = new Map();
   for (const p of panes) {
     const cwd = p.cwd || p.foreground_cwd;
     if (!cwd) continue;
+    // Managed task panes have their own identity/status path and are folded
+    // below. Never let them fall back to the old cwd fan-out path.
+    if (managedPaneIds.has(p.pane_id) || managedProjectDirs.has(cwd)) continue;
     if (!byCwd.has(cwd)) byCwd.set(cwd, []);
     byCwd.get(cwd).push(p);
   }
   cachedByCwd = byCwd;
-  updateDirWatchers(byCwd);
-  processPanes(byCwd);
+  const panesNow = allPanes();
+  cachedPaneIds = panesNow ? new Set(panesNow.map((pane) => pane.pane_id)) : null;
+  const watchedDirs = new Map(byCwd);
+  for (const task of tasks) watchedDirs.set(task.project_dir, []);
+  updateDirWatchers(watchedDirs);
+  processPanes(byCwd, cachedPaneIds);
 }
 
 function quickPass() {
-  processPanes(cachedByCwd);
+  processPanes(cachedByCwd, cachedPaneIds);
 }
 
-function processPanes(byCwd) {
+function patchDiffers(task, patch) {
+  return Object.entries(patch).some(([key, value]) => JSON.stringify(task[key]) !== JSON.stringify(value));
+}
+
+function processPanes(byCwd, paneIds) {
   const now = Date.now();
-  const board = { updatedAt: now, mode: eventsConnected ? "events" : "polling", projects: [] };
+  const board = { updatedAt: now, mode: eventsConnected ? "events" : "polling", tasks: [], projects: [] };
   const live = new Set();
   const awaitingNow = new Set();
   const wsAgg = new Map(); // workspace id -> {active, needy}
 
+  // Durable tasks are reduced by task identity. Each has a private project
+  // directory, so two runs against the same repository cannot overwrite one
+  // another's status file.
+  for (const original of listTasks()) {
+    const paneExists = !original.pane_id || paneIds === null || paneIds.has(original.pane_id);
+    const status = readStatus(original.project_dir);
+    const reduced = reduceTask(original, status?.snap ?? null, { paneExists, statusMtimeMs: status?.mtimeMs, nowMs: now });
+    if (status) ledgerTick(original.project_dir, status.snap.runs ?? [], reduced.liveness);
+    let task = original;
+    if (patchDiffers(original, reduced.patch)) task = updateTask(original.task_id, reduced.patch);
+
+    if (task.kind === "issue-queue" && task.campaign_id && task.shortlist?.length) {
+      try {
+        const campaign = readCampaign(task.campaign_id);
+        if (campaign.status === "ranking") updateCampaign(campaign.campaign_id, { status: "selecting" });
+      } catch {
+        // A missing campaign does not hide an otherwise recoverable task.
+      }
+    }
+
+    board.tasks.push(taskSummary(task, reduced.run));
+    if (!task.pane_id || !paneExists) continue;
+    reportTask(task.pane_id, task);
+    live.add(task.pane_id);
+    if (!isTerminalTask(task)) {
+      const agg = wsAgg.get(task.workspace_id) ?? { active: 0, needy: 0 };
+      agg.active += 1;
+      if (task.status === "needs-input") agg.needy += 1;
+      wsAgg.set(task.workspace_id, agg);
+    }
+    if (task.status === "needs-input" && reduced.run) {
+      notifyAwaiting(task.repo_root, [reduced.run], awaitingNow);
+    }
+  }
+
   for (const [cwd, cwdPanes] of byCwd) {
+    // Legacy cwd monitoring remains available for manually started Atomic
+    // sessions, but one status file cannot safely identify multiple panes.
+    if (cwdPanes.length !== 1) continue;
     const status = readStatus(cwd);
     if (!status) continue;
     const statusAgeMs = Math.max(0, now - status.mtimeMs);
@@ -436,115 +505,7 @@ function processPanes(byCwd) {
     saveIndex(ledgerIndex);
     indexDirty = false;
   }
-  writeFileSync(boardPath, JSON.stringify(board, null, 2));
-}
-
-// ── Control bridge ─────────────────────────────────────────────────────────
-// Local unix socket the optional atomic extension (and the board) connect
-// to. Extensions introduce themselves with {type:"hello", paneId, sessionId,
-// cwd}; the board sends {type:"control", verb, runId, cwd}. The watcher
-// routes a control request to the ONE extension connection whose cwd matches
-// — with zero or several candidates it refuses, because under the same-cwd
-// status.json clobber it cannot know which session owns the run.
-const bridgePath = path.join(STATE_DIR, "bridge.sock");
-const VERBS = {
-  pause: (runId) => `/workflow pause ${runId}`,
-  resume: (runId) => `/workflow resume ${runId}`,
-  interrupt: (runId) => `/workflow interrupt ${runId} -y`,
-  quit: (runId) => `/workflow quit ${runId}`,
-};
-const bridgeClients = new Set(); // {sock, paneId, sessionId, cwd}
-const pendingCommands = new Map(); // command id -> {reply, timer}
-
-function bridgeReply(sock, msg) {
-  try {
-    sock.write(`${JSON.stringify(msg)}\n`);
-  } catch {
-    // connection already gone
-  }
-}
-
-function handleControl(sock, msg) {
-  const verb = VERBS[msg.verb];
-  const runId = String(msg.runId ?? "");
-  if (!verb || !/^[0-9a-f-]{36}$/i.test(runId)) {
-    bridgeReply(sock, { type: "control-result", id: msg.id, ok: false, message: "bad verb or runId" });
-    return;
-  }
-  const candidates = [...bridgeClients].filter((c) => c.cwd === msg.cwd);
-  if (candidates.length === 0) {
-    bridgeReply(sock, {
-      type: "control-result", id: msg.id, ok: false,
-      message: "no atomic bridge for this project — install the atomic integration and start a fresh atomic session",
-    });
-    return;
-  }
-  if (candidates.length > 1) {
-    bridgeReply(sock, {
-      type: "control-result", id: msg.id, ok: false,
-      message: `ambiguous: ${candidates.length} atomic sessions share this cwd; run the command in the pane instead`,
-    });
-    return;
-  }
-  const target = candidates[0];
-  const timer = setTimeout(() => {
-    pendingCommands.delete(msg.id);
-    bridgeReply(sock, { type: "control-result", id: msg.id, ok: false, message: "bridge timeout (session busy or gone?)" });
-  }, 5000);
-  pendingCommands.set(msg.id, { reply: sock, timer });
-  bridgeReply(target.sock, { type: "command", id: msg.id, text: verb(runId) });
-}
-
-function startBridge() {
-  try {
-    rmSync(bridgePath, { force: true });
-  } catch {
-    // stale socket file cleanup is best-effort
-  }
-  const server = net.createServer((sock) => {
-    let buf = "";
-    let client = null; // set on hello (extension connections only)
-    sock.on("data", (chunk) => {
-      buf += chunk;
-      let nl;
-      while ((nl = buf.indexOf("\n")) >= 0) {
-        const line = buf.slice(0, nl);
-        buf = buf.slice(nl + 1);
-        if (!line.trim()) continue;
-        let msg;
-        try {
-          msg = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (msg?.type === "hello" && msg.protocol === 1) {
-          client = { sock, paneId: msg.paneId, sessionId: msg.sessionId, cwd: msg.cwd };
-          bridgeClients.add(client);
-        } else if (msg?.type === "control") {
-          handleControl(sock, msg);
-        } else if (msg?.type === "result") {
-          const pending = pendingCommands.get(msg.id);
-          if (pending) {
-            clearTimeout(pending.timer);
-            pendingCommands.delete(msg.id);
-            bridgeReply(pending.reply, {
-              type: "control-result", id: msg.id, ok: Boolean(msg.ok),
-              message: msg.ok ? "delivered" : String(msg.error ?? "failed"),
-            });
-          }
-        }
-      }
-    });
-    const drop = () => {
-      if (client) bridgeClients.delete(client);
-    };
-    sock.on("error", drop);
-    sock.on("close", drop);
-  });
-  server.on("error", () => {
-    // Another watcher instance owns the socket; start-watcher kills us soon.
-  });
-  server.listen(bridgePath);
+  atomicWriteJson(boardPath, board);
 }
 
 // ── Scheduler ──────────────────────────────────────────────────────────────
@@ -584,7 +545,6 @@ function reconcileLoop() {
 }
 
 reconcileLoop();
-startBridge();
 
 subscribe(
   ["pane.created", "pane.closed", "pane.exited", "pane.agent_detected"].map((type) => ({ type })),

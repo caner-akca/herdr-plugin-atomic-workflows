@@ -1,12 +1,12 @@
 id = "atomic.workflows"
 name = "Atomic Workflows"
-version = "0.7.0"
-min_herdr_version = "0.7.0"
-description = "Show running atomic workflow status under agents in the herdr sidebar, with a popup board for details."
+version = "0.8.0"
+min_herdr_version = "0.8.2"
+description = "Launch and monitor isolated Atomic workflow tasks from a compact Herdr campaign board."
 platforms = ["linux", "macos"]
 
-# Long-lived watcher: polls agent panes, watches each project's
-# .atomic/workflows/status.json, reports $wf / $wf_stage metadata tokens.
+# Long-lived watcher: watches task-private Atomic status feeds and reconciles
+# their durable task/pane identity into sidebar metadata and the board.
 [[startup]]
 command = ["node", "bin/start-watcher.mjs"]
 
@@ -15,6 +15,12 @@ id = "open-board"
 title = "Workflow board"
 contexts = ["workspace"]
 command = ["node", "bin/open-board.mjs"]
+
+[[actions]]
+id = "start-issue-campaign"
+title = "Start issue campaign"
+contexts = ["workspace"]
+command = ["node", "bin/start-campaign.mjs"]
 
 [[actions]]
 id = "restart-watcher"
@@ -41,3 +47,9 @@ id = "viewer"
 title = "Workflow transcript"
 placement = "tab"
 command = ["node", "bin/viewer.mjs"]
+
+[[panes]]
+id = "task"
+title = "Atomic task"
+placement = "tab"
+command = ["node", "bin/task-runner.mjs"]

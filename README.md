@@ -1,132 +1,129 @@
 # herdr-atomic-plugin
 
-Herdr plugin that surfaces **atomic workflow runs** in the herdr sidebar:
-each agent pane whose project has an active workflow gets a sublabel with the
-run name and current stage, and a popup board shows every run and stage.
+A small campaign cockpit for Herdr and Atomic. It ranks an issue queue, lets
+you select several issues, and opens one durable Herdr tab and one isolated
+Atomic session for each selected issue.
+
+The plugin deliberately stops there. Workflow logic, evidence, code changes,
+questions, pause/resume, and interruption remain inside each Atomic pane.
+
+## Requirements
+
+- Herdr 0.8.2 or newer.
+- Atomic with the workflow extension and `statusFile` support.
+- A Herdr workflow repository containing:
+  - `herdr-triage-queue` with `mode="rank-only"`, `repo_dir`, and a typed
+    `shortlist` output.
+  - `herdr-bug-pipeline` with `repo_dir`.
+  - `herdr-issue-triage` with `repo_dir`, forwarded by the pipeline.
+
+Direct workflow runs remain compatible: an empty `repo_dir` falls back to
+`ctx.cwd`.
 
 ## Setup
 
-1. Opt atomic into its machine-readable workflow status feed (once, global):
+Link the local plugin:
 
-   ```bash
-   mkdir -p ~/.atomic/agent/extensions/workflow
-   echo '{ "statusFile": true }' > ~/.atomic/agent/extensions/workflow/config.json
+```bash
+herdr plugin link /path/to/herdr-atomic-plugin
+```
+
+The startup hook starts the watcher. During development, restart it after a
+watcher change with the **Restart workflow watcher** action.
+
+For compact task rows, add these optional sidebar tokens to
+`~/.config/herdr/config.toml`:
+
+```toml
+[ui.sidebar.agents]
+rows = [
+  ["state_icon", "workspace", "tab"],
+  ["agent", "state_text"],
+  [{ token = "$task", fg = "#89b4fa", bold = true }],
+  [{ token = "$phase", dim = true }, { token = "$progress", dim = true }],
+  [{ token = "$attention", fg = "#f38ba8" }, { token = "$wf_cost", dim = true }],
+]
+
+[ui.sidebar.spaces]
+rows = [
+  ["state_icon", "workspace", "branch"],
+  [{ token = "$wf_active", dim = true }, { token = "$wf_needy", fg = "#f38ba8" }],
+]
+```
+
+Then run `herdr server reload-config`.
+
+## Daily use
+
+1. Open the Herdr repository as a Herdr workspace.
+2. Invoke **Start issue campaign**. A focused `Issue queue` tab runs:
+
+   ```text
+   /workflow herdr-triage-queue mode="rank-only" shortlist_size=15 repo_dir="..."
    ```
 
-2. Link (or install) the plugin:
+3. Open **Workflow board** after ranking completes.
+4. Use `j`/`k` to move, `space` to select, `a` to select the first five
+   `fix-now` recommendations, `x` to clear, and `enter` to launch. A launch is
+   intentionally capped at five tasks.
+5. The plugin creates one background tab per selected issue and starts:
 
-   ```bash
-   herdr plugin link /path/to/herdr-atomic-plugin
+   ```text
+   /workflow herdr-bug-pipeline issue=123 repo_dir="..." simplify="on" review=true
    ```
 
-3. Add the workflow rows to your herdr sidebar config
-   (`~/.config/herdr/config.toml`), then `herdr server reload-config`:
+   Press `p` to switch the shortlist area to cached open pull requests. The
+   same `j`/`k`, `space`, `x`, and `enter` keys launch up to five isolated
+   review tasks:
 
-   ```toml
-   [ui.sidebar.agents]
-   rows = [
-     ["state_icon", "workspace", "tab"],
-     ["agent", "state_text"],
-     [{ token = "$wf", fg = "#89b4fa", bold = true }],
-     [{ token = "$wf_stage", dim = true }],
-     [{ token = "$wf_cost", dim = true }],
-   ]
-
-   # optional: workspace-level rollups on the Spaces rows
-   [ui.sidebar.spaces]
-   rows = [
-     ["state_icon", "workspace", "branch"],
-     [{ token = "$wf_active", dim = true }, { token = "$wf_needy", fg = "#f38ba8" }],
-   ]
+   ```text
+   /workflow herdr-code-review target="123" repo_dir="..."
    ```
 
-   The `$wf` rows take zero vertical space while no workflow is running.
+6. On a task row, `enter` focuses its real Atomic pane. Answer questions and
+   use Atomic controls there.
 
-4. Start the watcher (happens automatically at server startup via the plugin
-   startup hook; to start it now):
+The board also retains the old run ledger: `l` opens legacy manually-started
+workflow runs and `h` opens history. `b` returns to tasks.
 
-   ```bash
-   herdr plugin action invoke atomic.workflows.restart-watcher
-   ```
+## Identity and isolation
 
-## Use
+Every campaign and task has a UUID-backed manifest under Herdr's plugin state
+directory:
 
-- Run any atomic workflow (`/workflow <name>` or the `workflow` tool) in a
-  pane — within ~2 s the sidebar shows `run-name` and its current stage,
-  including `needs input: <stage>` when a stage is waiting on you.
-- When a stage starts **waiting for input**, the sidebar token, the board,
-  and a system notification (`herdr notification show`, following your
-  `[ui.toast]` delivery config) all carry the **actual question and choices**
-  from the stage's pending prompt — one toast per stage, re-armed when the
-  stage moves on.
-- The board shows per-stage elapsed time and model, failure details
-  (`failureKind/failureCode`, retry countdown, resumable), atomic notices,
-  and pending-stage counts. Scroll with `j`/`k` (or arrows), `g`/`G` to jump.
-- **Cost telemetry:** per-stage and per-run USD cost + turn counts (from
-  atomic's `modelAttempts[].usage`) in the board, and a `$wf_cost` sidebar
-  token. This data exists *only* in the live status file — nothing else
-  records it.
-- **History:** press `h` on the board for the run ledger — rows link to
-  their transcripts with the same `[1]`-`[9]` digit keys as the active view — every observed
-  run's outcome, duration, and final cost, journaled by the watcher to
-  NDJSON under the plugin state dir (`ledger/*.ndjson`, greppable) before
-  atomic's session-start wipe destroys it. Runs that vanish mid-flight are
-  recorded as `lost`; dead-file verdicts as `dead` (both marked as watcher
-  verdicts, not atomic's word).
-- **Workspace rollups:** `$wf_active` / `$wf_needy` tokens for the Spaces
-  sidebar rows show per-workspace workflow load.
-- **Workflows-only view:** the *Toggle workflows-only view* action filters
-  herdr's Agents sidebar to panes with an active workflow (most
-  attention-worthy first). The projection is transient in herdr; the watcher
-  reapplies it on startup while toggled on.
-- **Transcript deep links:** on the board, stages with a session transcript
-  and runs with rendered transcripts get `[1]`-`[9]` markers — press the
-  digit to open the file in a viewer tab (session `.jsonl` files are
-  rendered entry-by-entry; `q` closes). Note: atomic prunes run artifacts
-  after ~30 days.
-- **Control verbs (dormant):** the board has a run cursor (`n`/Tab) and
-  `p`/`r`/`i`/`Q` pause/resume/interrupt/quit keys, wired to a local bridge
-  socket the watcher hosts. Actually delivering a verb needs an optional
-  atomic extension that is **deliberately not bundled** (it would execute
-  commands inside your atomic sessions — a trust decision each user should
-  make by hand). Without it, verbs answer "no atomic bridge for this
-  project" and nothing else changes. See `bin/install-extension.mjs` and
-  the bridge protocol in `bin/watcher.mjs` if you want to build and audit
-  your own: an extension connects to `<state-dir>/bridge.sock`, sends
-  `{type:"hello", protocol:1, paneId, sessionId, cwd}`, and executes
-  `{type:"command", text:"/workflow …"}` messages via `pi.sendUserMessage`
-  — reject any text not starting with `/workflow `.
-- **Event-driven core:** the watcher subscribes to herdr pane lifecycle
-  events over the socket and `fs.watch`es each project's workflows
-  directory, reacting to status changes in well under a second, with a 10 s
-  reconciliation pass as backstop (which also refreshes token TTLs). If the
-  event stream is unavailable it falls back to classic 2 s polling — the
-  board footer shows which mode is live (`events` / `polling`).
-- **Stale/dead detection:** atomic's status file has no heartbeat, and a
-  killed atomic leaves `status: "running"` on disk forever. While a run
-  claims to be actively executing, no status write for 45 s marks it
-  `(stale?)` and 5 min marks it `[dead?]` — paused and awaiting-input runs
-  are exempt (their silence is expected).
-- Open the board: right-click → **Workflow board**, or:
+```text
+tasks/<task-id>/
+├── task.json
+├── project/.atomic/extensions/workflow/config.json
+├── project/.atomic/workflows/status.json
+├── sessions/
+└── atomic-artifacts/
+```
 
-  ```bash
-  herdr plugin action invoke atomic.workflows.open-board
-  ```
+Atomic runs in `project/`, while the workflow's typed `repo_dir` points at the
+real repository. Consequently, parallel tasks for the same repository cannot
+overwrite one shared status file. `task.json` permanently binds task,
+campaign, pane, tab, Atomic session, and workflow run identities.
 
-  Optional keybinding:
+Launching is deduplicated by repository + task kind + issue number. Selecting
+an issue that already has an open task reuses that task instead of opening a
+second run.
 
-  ```toml
-  [[keys.command]]
-  key = "prefix+shift+w"
-  type = "plugin_action"
-  command = "atomic.workflows.open-board"
-  description = "workflow board"
-  ```
+## Deliberate non-features
 
-## How it works
+This version does not inject answers or Atomic control commands, create or
+publish PRs, monitor CI, schedule hosts, provision VMs, archive tasks, or infer
+semantic lifecycle phases with a model. The board shows Atomic's deterministic
+run/stage state and focuses the pane where richer control already exists.
 
-See `specs/workflow-status.md`. Short version: atomic atomically rewrites
-`<project>/.atomic/workflows/status.json` on every workflow state change; a
-small watcher daemon maps herdr agent panes to their projects, folds that file
-into two ≤80-char metadata tokens per pane (`wf`, `wf_stage`, TTL'd so stale
-state self-erases), and herdr's sidebar row templates render them.
+Manually started Atomic sessions are still shown through the older cwd-based
+compatibility view, but only when exactly one pane owns that cwd. Managed task
+panes always use task identity.
+
+## Development checks
+
+```bash
+node --test test/*.test.mjs
+node --check bin/watcher.mjs
+node --check bin/board.mjs
+```

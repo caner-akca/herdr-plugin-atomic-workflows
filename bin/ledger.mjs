@@ -20,13 +20,13 @@
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
+import { STATE_DIR } from "./plugin-state.mjs";
 
-const STATE_DIR = process.env.HERDR_PLUGIN_STATE_DIR || "/tmp/atomic-workflows-plugin";
 const LEDGER_DIR = path.join(STATE_DIR, "ledger");
 const INDEX_PATH = path.join(LEDGER_DIR, "index.json");
 const INDEX_MAX_RUNS = 2000;
 
-export function cwdKey(cwd) {
+function cwdKey(cwd) {
   return createHash("sha256").update(cwd).digest("hex").slice(0, 16);
 }
 
