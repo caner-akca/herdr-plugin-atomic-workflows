@@ -113,7 +113,7 @@ export function launchQueueTask(campaign, { focus = true } = {}) {
   return launchTaskPane(task, { focus });
 }
 
-function launchIssueTask({ campaign, issue, focus = false }) {
+export function launchIssueTask({ campaign, issue, focus = false }) {
   if (!Number.isInteger(issue) || issue < 1) throw new Error(`invalid issue number: ${issue}`);
   const existing = findOpenTask(campaign.repo_root, "issue-fix", issue);
   if (existing) {

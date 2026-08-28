@@ -1,6 +1,6 @@
 id = "atomic.workflows"
 name = "Atomic Workflows"
-version = "0.8.0"
+version = "0.9.0"
 min_herdr_version = "0.8.2"
 description = "Launch and monitor isolated Atomic workflow tasks from a compact Herdr campaign board."
 platforms = ["linux", "macos"]
@@ -21,6 +21,16 @@ id = "start-issue-campaign"
 title = "Start issue campaign"
 contexts = ["workspace"]
 command = ["node", "bin/start-campaign.mjs"]
+
+# Telegram cockpit daemon (skips itself when no bot token is configured).
+[[startup]]
+command = ["node", "bin/start-telegram.mjs"]
+
+[[actions]]
+id = "restart-telegram"
+title = "Restart Telegram cockpit"
+contexts = ["workspace"]
+command = ["node", "bin/start-telegram.mjs"]
 
 [[actions]]
 id = "restart-watcher"

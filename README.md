@@ -120,6 +120,54 @@ Manually started Atomic sessions are still shown through the older cwd-based
 compatibility view, but only when exactly one pane owns that cwd. Managed task
 panes always use task identity.
 
+## Telegram cockpit (optional)
+
+A long-polling daemon (`bin/telegram.mjs`) turns the campaign cockpit into a
+phone remote: observe runs, fetch every artifact, launch tasks after
+inline-button confirmation, and hand curated evidence to a maintainer chat
+whose decisions are recorded — never executed. It makes no model calls and
+message text never reaches a shell; commands are a closed, typed grammar.
+
+Setup:
+
+1. Create a bot with @BotFather and put secrets in the plugin config dir
+   (`herdr plugin config-dir atomic.workflows`) as `.env`:
+
+   ```sh
+   TELEGRAM_BOT_TOKEN=123456:abc...
+   TELEGRAM_COCKPIT_CHAT_ID=<your chat id>
+   TELEGRAM_MAINTAINER_CHAT_ID=<optional, for /handoff>
+   ```
+
+2. Next to it, `telegram.json`:
+
+   ```json
+   {
+     "users": [{ "id": 111111111, "role": "owner" }],
+     "repo_root": "/path/to/herdr"
+   }
+   ```
+
+   Roles: `owner` (everything) or `observer` (read-only). Message the bot
+   before configuring users and it replies with your numeric id. Unknown
+   senders are logged to `telegram/strangers.log` and ignored.
+
+3. Restart the daemon with the **Restart Telegram cockpit** action (the
+   startup hook skips itself while no `.env` exists).
+
+Commands: `/status`, `/task`, `/runs`, `/history`, `/cost`;
+`/artifacts <issue|tN>` + `/get aK`, `/report`, `/evidence`, `/driver`,
+`/diff`, `/gif <n> [repro|replay|fixed]`; owner-only `/queue`, `/fix`
+(double-confirmed), `/review`, `/handoff <issue>`, `/mute`, `/halt`.
+
+`/handoff` posts a rationale-first digest (root cause, why fixing matters,
+evidence summary) with report, why, replay driver, evidence, PR draft, GIF,
+and the staged diff to the maintainer chat, plus decision buttons
+(approved / changes / wontfix / info). Button presses and free-text replies
+are appended to `telegram/decisions.ndjson` and forwarded to the owner;
+nothing runs on the maintainer's side. Files are only ever served from the
+repository's `.local` artifact roots and the retained fix worktrees.
+
 ## Development checks
 
 ```bash
