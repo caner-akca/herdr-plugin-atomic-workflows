@@ -20,7 +20,15 @@ const TASK_LAUNCH_CAP = 5;
 function serializeWorkflowValue(value) {
   if (typeof value === "boolean") return value ? "true" : "false";
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
-  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "string") {
+    // Review F21: Atomic's command tokenizer toggles quote state without
+    // escape handling, so a value containing a quote or backslash would be
+    // split into the wrong tokens. Refuse what cannot round-trip.
+    if (/["\\\n\r]/.test(value)) {
+      throw new Error(`workflow input value cannot be represented in a /workflow command: ${JSON.stringify(value)}`);
+    }
+    return JSON.stringify(value);
+  }
   throw new Error(`unsupported workflow input value: ${typeof value}`);
 }
 

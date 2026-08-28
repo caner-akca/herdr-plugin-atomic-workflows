@@ -30,3 +30,12 @@ test("extracts permanent pane and tab identity from Herdr response", () => {
   assert.equal(pane.tab_id, "w1:t4");
 });
 
+
+test("values the atomic tokenizer cannot round-trip are refused (review F21)", () => {
+  assert.throws(() => buildWorkflowCommand("herdr-bug-pipeline", { repo_dir: '/tmp/has"quote' }), /cannot be represented/);
+  assert.throws(() => buildWorkflowCommand("herdr-bug-pipeline", { repo_dir: "/tmp/back\\slash" }), /cannot be represented/);
+  assert.equal(
+    buildWorkflowCommand("herdr-bug-pipeline", { repo_dir: "/tmp/plain path" }),
+    '/workflow herdr-bug-pipeline repo_dir="/tmp/plain path"',
+  );
+});

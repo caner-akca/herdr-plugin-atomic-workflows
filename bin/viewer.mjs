@@ -5,6 +5,7 @@
 // j/k/arrows scroll, space/b page, g/G jump, q/esc closes the pane.
 
 import { existsSync, readFileSync } from "node:fs";
+import { sanitizeExternal } from "./display.mjs";
 import path from "node:path";
 
 const target = process.env.VIEW_TARGET || process.argv[2] || "";
@@ -47,7 +48,7 @@ function loadLines() {
     const kind = entry.type ?? "?";
     const sub = entry.customType ? ` · ${entry.customType}` : entry.role ? ` · ${entry.role}` : "";
     lines.push(`\x1b[1m── [${i}] ${kind}${sub}\x1b[0m`);
-    const body = textish(entry).trim();
+    const body = sanitizeExternal(textish(entry)).trim();
     if (body) for (const l of body.split("\n")) lines.push(`   ${l}`);
   }
   return lines.length ? lines : ["(empty session file)"];

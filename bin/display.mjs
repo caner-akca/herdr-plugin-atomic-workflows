@@ -40,3 +40,14 @@ export function resolveWorkspaceId(env = process.env) {
     return "";
   }
 }
+
+/** Review F20: external text (issue titles, model prompts, transcript lines,
+ * workflow errors) can carry C0/C1/ESC/OSC bytes that repaint the pane and
+ * imitate board output. Strip them; keep tabs and printable text. */
+export function sanitizeExternal(text) {
+  return String(text ?? "")
+    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?/g, "")
+    .replace(/\u001b\[[0-9;:?]*[ -\/]*[@-~]?/g, "")
+    .replace(/\u001b./g, "")
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
+}

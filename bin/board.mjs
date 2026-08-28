@@ -7,7 +7,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fmtCost, resolveWorkspaceId, stagePrompt, tasksForWorkspace } from "./display.mjs";
+import { fmtCost, resolveWorkspaceId, sanitizeExternal, stagePrompt, tasksForWorkspace } from "./display.mjs";
 import { STATE_DIR } from "./plugin-state.mjs";
 import { readHistory, usageOfRun, usageOfStage } from "./ledger.mjs";
 import { focusTask, launchSelectedIssues, launchSelectedReviews } from "./task-launcher.mjs";
@@ -48,7 +48,7 @@ function launchIssues(campaignId, issues) {
     selectedIssues.clear();
     statusMsg = `launched ${created} task${created === 1 ? "" : "s"}${reused ? ` · reused ${reused}` : ""}`;
   } catch (error) {
-    statusMsg = `launch: ✗ ${error instanceof Error ? error.message : String(error)}`;
+    statusMsg = `launch: ✗ ${sanitizeExternal(error instanceof Error ? error.message : String(error))}`;
   }
   render();
 }
@@ -61,7 +61,7 @@ function launchReviews(campaignId, prs) {
     selectedReviews.clear();
     statusMsg = `launched ${created} review${created === 1 ? "" : "s"}${reused ? ` · reused ${reused}` : ""}`;
   } catch (error) {
-    statusMsg = `launch: ✗ ${error instanceof Error ? error.message : String(error)}`;
+    statusMsg = `launch: ✗ ${sanitizeExternal(error instanceof Error ? error.message : String(error))}`;
   }
   render();
 }
@@ -205,7 +205,7 @@ function elapsed(x, now) {
 function failureLine(x) {
   const bits = [];
   if (x.failureKind) bits.push(x.failureCode ? `${x.failureKind}/${x.failureCode}` : x.failureKind);
-  if (x.error) bits.push(String(x.error).slice(0, 100));
+  if (x.error) bits.push(sanitizeExternal(x.error).slice(0, 100));
   if (Number.isFinite(x.retryAfterMs)) bits.push(`retry in ${fmtDur(x.retryAfterMs)}`);
   if (x.resumable) bits.push("resumable");
   return bits.length ? bits.join(" · ") : null;
@@ -251,7 +251,7 @@ function projectLines(project, now, width, targets) {
         const waitAge = Number.isFinite(stage.awaitingInputSince) ? ` — waiting ${fmtDur(now - stage.awaitingInputSince)}` : "";
         const prompt = stagePrompt(stage, run);
         if (prompt) {
-          lines.push(YELLOW(`         Q: ${prompt.message.slice(0, width - 14)}${waitAge}`));
+          lines.push(YELLOW(`         Q: ${sanitizeExternal(prompt.message).slice(0, width - 14)}${waitAge}`));
           if (prompt.choices.length) lines.push(YELLOW(`         choices: ${prompt.choices.join(" / ").slice(0, width - 18)}`));
         } else if (waitAge) {
           lines.push(YELLOW(`        ${waitAge.slice(3)}`));
@@ -303,7 +303,7 @@ function taskLines(board, width) {
     } else if (reviewList.loading && reviewList.prs.length === 0) {
       lines.push(DIM("   loading open pull requests…"));
     } else if (reviewList.error) {
-      lines.push(YELLOW(`   could not list PRs: ${reviewList.error}`));
+      lines.push(YELLOW(`   could not list PRs: ${sanitizeExternal(reviewList.error)}`));
     } else if (reviewList.prs.length === 0) {
       lines.push(DIM("   no open pull requests"));
     } else {
@@ -317,7 +317,7 @@ function taskLines(board, width) {
         const checked = selectedReviews.has(pr) ? "x" : " ";
         const author = item.author?.login ? ` · @${item.author.login}` : "";
         const draft = item.isDraft ? " · draft" : "";
-        const title = String(item.title ?? "").slice(0, Math.max(10, width - 32));
+        const title = sanitizeExternal(item.title ?? "").slice(0, Math.max(10, width - 32));
         lines.push(`${cursor} [${checked}] PR #${pr}${draft}${author}  ${title}`);
         rows.push(row);
       }
@@ -340,7 +340,7 @@ function taskLines(board, width) {
       const score = Number.isFinite(Number(item.score)) ? ` ${Number(item.score).toFixed(1)}` : "";
       const tag = item.recommendation ? ` · ${item.recommendation}` : "";
       const os = Array.isArray(item.os) ? item.os.join("/") : Array.isArray(item.affected_platforms) ? item.affected_platforms.join("/") : "";
-      const title = String(item.title ?? "").slice(0, Math.max(10, width - 38));
+      const title = sanitizeExternal(item.title ?? "").slice(0, Math.max(10, width - 38));
       lines.push(`${cursor} [${checked}] #${issue}${score}${tag}${os ? ` · ${os}` : ""}  ${title}`);
       rows.push(row);
     }
@@ -362,7 +362,7 @@ function taskLines(board, width) {
       const cost = fmtCost(task.cost);
       const meta = [task.phase ?? task.status, task.progress, cost].filter(Boolean).join(" · ");
       lines.push(`${cursor} ${glyph} ${BOLD(task.title ?? `#${task.target}`)}  ${DIM(meta)}`);
-      if (task.attention) lines.push(YELLOW(`     ${String(task.attention).slice(0, Math.max(20, width - 7))}`));
+      if (task.attention) lines.push(YELLOW(`     ${sanitizeExternal(task.attention).slice(0, Math.max(20, width - 7))}`));
       rows.push(row);
     }
   }
