@@ -28,3 +28,15 @@ export function tasksForWorkspace(tasks, workspaceId) {
   if (!workspaceId) return [...tasks];
   return tasks.filter((task) => String(task.workspace_id) === String(workspaceId));
 }
+
+/** Review F7: popup panes receive the invoking workspace through
+ * HERDR_PLUGIN_CONTEXT_JSON, not HERDR_WORKSPACE_ID. Resolve both. */
+export function resolveWorkspaceId(env = process.env) {
+  if (env.HERDR_WORKSPACE_ID) return String(env.HERDR_WORKSPACE_ID);
+  try {
+    const context = JSON.parse(env.HERDR_PLUGIN_CONTEXT_JSON || "{}");
+    return context.workspace_id ? String(context.workspace_id) : "";
+  } catch {
+    return "";
+  }
+}

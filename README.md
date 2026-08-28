@@ -120,6 +120,26 @@ Manually started Atomic sessions are still shown through the older cwd-based
 compatibility view, but only when exactly one pane owns that cwd. Managed task
 panes always use task identity.
 
+## Liveness and ownership
+
+A quiet `status.json` only ever means *quiet*: task and legacy rows show a
+`(quiet Nm?)` marker while a long model call, build, or remote command writes
+nothing, and the run's own status stays truthful. Terminal death requires
+independent pane evidence (`pane-gone`); the ledger records synthetic ends
+only for runs that actually vanished from their file. A runless `launching`
+task expires to terminal `launch-failed` after 10 minutes so its issue/PR can
+be relaunched.
+
+Exactly one watcher owns one state root: it requires
+`HERDR_PLUGIN_STATE_DIR` from Herdr, claims `watcher.pid` (JSON identity),
+yields to a newer claimant within one pass, and exits when its server's
+socket stays gone for a minute. Restart never signals a PID whose live
+command line is not verifiably our watcher. Per-task failures are isolated
+and surfaced as `board.json.health` plus `watcher-health.log`; watcher output
+lands in `watcher.log`. Launch admission (find-or-create per
+repository+kind+target) runs under a cross-process lock, and batch launches
+record each task in the campaign before starting the next.
+
 ## Telegram cockpit (optional)
 
 A long-polling daemon (`bin/telegram.mjs`) turns the campaign cockpit into a

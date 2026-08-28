@@ -1,6 +1,6 @@
 id = "atomic.workflows"
 name = "Atomic Workflows"
-version = "0.9.0"
+version = "0.9.1"
 min_herdr_version = "0.8.2"
 description = "Launch and monitor isolated Atomic workflow tasks from a compact Herdr campaign board."
 platforms = ["linux", "macos"]

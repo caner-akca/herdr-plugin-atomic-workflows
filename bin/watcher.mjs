@@ -26,7 +26,8 @@
 // wipe can destroy it.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, statSync, watch } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, watch } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fmtCost, stagePrompt, taskLabel } from "./display.mjs";
 import { STATE_DIR } from "./plugin-state.mjs";
@@ -41,7 +42,8 @@ import {
   updateCampaign,
   updateTask,
 } from "./task-store.mjs";
-import { liveness, reduceTask, taskSummary } from "./task-reducer.mjs";
+import { liveness, rebindMovedTask, reduceTask, taskSummary } from "./task-reducer.mjs";
+import { claimOwner, ownerPath, stillOwner } from "./watcher-owner.mjs";
 
 const HERDR = process.env.HERDR_BIN_PATH || "herdr";
 const SOURCE = "plugin:atomic.workflows";
@@ -53,8 +55,53 @@ const ACTIVE = new Set(["pending", "running", "paused"]);
 const RUN_TERMINAL = new Set(["completed", "skipped", "failed", "blocked", "killed", "cancelled"]);
 const STAGE_TERMINAL = new Set(["completed", "failed", "skipped"]);
 
+// Review F1: one watcher per state root, bound to one Herdr server.
+// - The state dir must come from Herdr; a fallback dir would let watchers
+//   from different servers collide invisibly.
+// - Ownership: claim the owner file; if a newer watcher claims it, this one
+//   exits within a pass. PIDs are never signalled unverified (start-watcher).
+// - Server loss: when the owning server's socket stays gone, exit instead of
+//   polling a dead server forever.
+if (!process.env.HERDR_PLUGIN_STATE_DIR) {
+  console.error("watcher requires HERDR_PLUGIN_STATE_DIR from Herdr; refusing the fallback state dir");
+  process.exit(1);
+}
 mkdirSync(STATE_DIR, { recursive: true });
 const boardPath = path.join(STATE_DIR, "board.json");
+const OWNER_FILE = ownerPath(STATE_DIR);
+const SERVER_SOCKET = process.env.HERDR_SOCKET_PATH || path.join(os.homedir(), ".config", "herdr", "herdr.sock");
+const SERVER_LOSS_EXIT_MS = 60_000;
+claimOwner(OWNER_FILE, { pid: process.pid, startedAt: Date.now(), socket: SERVER_SOCKET, script: "watcher.mjs" });
+let serverMissingSince = null;
+
+function ownershipTick() {
+  if (!stillOwner(OWNER_FILE, process.pid)) {
+    console.error("a newer watcher claimed ownership; exiting");
+    process.exit(0);
+  }
+  if (existsSync(SERVER_SOCKET)) {
+    serverMissingSince = null;
+  } else {
+    serverMissingSince ??= Date.now();
+    if (Date.now() - serverMissingSince > SERVER_LOSS_EXIT_MS) {
+      console.error(`owning server socket ${SERVER_SOCKET} gone for ${SERVER_LOSS_EXIT_MS}ms; exiting`);
+      process.exit(0);
+    }
+  }
+}
+
+// Review F10: per-task/pass failures are isolated and surfaced on the board
+// instead of silently stopping every projection.
+const health = [];
+function recordHealth(scope, id, error) {
+  health.push({ ts: Date.now(), scope, id, error: String(error?.message ?? error).slice(0, 200) });
+  if (health.length > 20) health.splice(0, health.length - 20);
+  try {
+    appendFileSync(path.join(STATE_DIR, "watcher-health.log"), `${new Date().toISOString()} [${scope}] ${id}: ${String(error?.message ?? error).slice(0, 300)}\n`);
+  } catch {
+    // health logging must never take the watcher down
+  }
+}
 
 function herdr(args) {
   const r = spawnSync(HERDR, args, { encoding: "utf8", timeout: 15000 });
@@ -123,22 +170,17 @@ function summarize(snapshot, statusAgeMs) {
   const prefix = active.length > 1 ? `${active.length} runs | ` : "";
   const wf = `${prefix}${top.name}`.slice(0, 78);
   let wfStage;
-  if (live === "dead") {
-    // Phantom-running guard: the file claims a live run but nothing has
-    // written it for a long time — do not present it as running.
-    wfStage = `[dead? no writes ${Math.round(statusAgeMs / 60000)}m]`.slice(0, 78);
+  if (stage && stage.status === "awaiting_input") {
+    const prompt = stagePrompt(stage, top);
+    wfStage = `needs input: ${stage.name}${prompt ? ` — ${prompt.message}` : ""}`;
+  } else if (stage) {
+    wfStage = `${stage.name} [${top.status}]`;
   } else {
-    if (stage && stage.status === "awaiting_input") {
-      const prompt = stagePrompt(stage, top);
-      wfStage = `needs input: ${stage.name}${prompt ? ` — ${prompt.message}` : ""}`;
-    } else if (stage) {
-      wfStage = `${stage.name} [${top.status}]`;
-    } else {
-      wfStage = `[${top.status}]`;
-    }
-    if (live === "stale") wfStage = `${wfStage.slice(0, 68)} (stale?)`;
-    wfStage = wfStage.slice(0, 78);
+    wfStage = `[${top.status}]`;
   }
+  // Review F2: age is only ever "quiet", never death.
+  if (live === "stale") wfStage = `${wfStage.slice(0, 62)} (quiet ${Math.max(1, Math.round(statusAgeMs / 60000))}m?)`;
+  wfStage = wfStage.slice(0, 78);
   const needyCount = active.filter((r) => (r.stages ?? []).some((s) => s.status === "awaiting_input")).length;
   const cost = fmtCost(usageOfRun(top).cost);
   return { wf, wfStage, cost, active, live, needyCount };
@@ -317,12 +359,10 @@ function ledgerTick(cwd, runs, live) {
     }
     if (RUN_TERMINAL.has(run.status) && ledgerIndex[run.id]?.phase !== "ended") {
       markEnded(run, cwd, run.status);
-    } else if (live === "dead" && run.status === "running" && ledgerIndex[run.id]?.phase !== "ended") {
-      // F1's verdict as a synthetic terminal state: the file stopped
-      // updating while claiming to run. If it later resumes, the run
-      // reappears active and gets a reobserved run.start.
-      markEnded(run, cwd, "dead", { synthetic: true });
     }
+    // Review F2: no synthetic "dead" verdicts from file age — quiet running
+    // work stays running. Synthetic ends remain only for runs that actually
+    // vanished from their file ("lost", below).
   }
   // Runs that vanished from this cwd's file (session_start wipe or same-cwd
   // clobber): journal what we last saw as a synthetic "lost" end.
@@ -411,7 +451,7 @@ function patchDiffers(task, patch) {
 
 function processPanes(byCwd, paneIds) {
   const now = Date.now();
-  const board = { updatedAt: now, mode: eventsConnected ? "events" : "polling", tasks: [], projects: [] };
+  const board = { updatedAt: now, mode: eventsConnected ? "events" : "polling", tasks: [], projects: [], health: [...health] };
   const live = new Set();
   const awaitingNow = new Set();
   const wsAgg = new Map(); // workspace id -> {active, needy}
@@ -420,6 +460,7 @@ function processPanes(byCwd, paneIds) {
   // directory, so two runs against the same repository cannot overwrite one
   // another's status file.
   for (const original of listTasks()) {
+    try {
     const paneExists = !original.pane_id || paneIds === null || paneIds.has(original.pane_id);
     const status = readStatus(original.project_dir);
     const reduced = reduceTask(original, status?.snap ?? null, { paneExists, statusMtimeMs: status?.mtimeMs, nowMs: now });
@@ -449,9 +490,13 @@ function processPanes(byCwd, paneIds) {
     if (task.status === "needs-input" && reduced.run) {
       notifyAwaiting(task.repo_root, [reduced.run], awaitingNow);
     }
+    } catch (error) {
+      recordHealth("task", original.task_id, error);
+    }
   }
 
   for (const [cwd, cwdPanes] of byCwd) {
+    try {
     // Legacy cwd monitoring remains available for manually started Atomic
     // sessions, but one status file cannot safely identify multiple panes.
     if (cwdPanes.length !== 1) continue;
@@ -487,6 +532,9 @@ function processPanes(byCwd, paneIds) {
       wsAgg.set(wsId, agg);
     }
     if (summary.live === "fresh") notifyAwaiting(cwd, summary.active, awaitingNow);
+    } catch (error) {
+      recordHealth("project", cwd, error);
+    }
   }
   for (const key of notified) if (!awaitingNow.has(key)) notified.delete(key);
 
@@ -528,18 +576,19 @@ function schedulePass(full) {
     try {
       if (wasFull) fullPass();
       else quickPass();
-    } catch {
-      // keep the daemon alive
+    } catch (error) {
+      recordHealth("pass", wasFull ? "full" : "quick", error);
     }
   }, DEBOUNCE_MS);
 }
 const scheduleQuick = () => schedulePass(false);
 
 function reconcileLoop() {
+  ownershipTick();
   try {
     fullPass();
-  } catch {
-    // keep the daemon alive; next pass retries
+  } catch (error) {
+    recordHealth("pass", "reconcile", error);
   }
   setTimeout(reconcileLoop, eventsConnected ? RECONCILE_MS : POLL_MS);
 }
@@ -547,8 +596,17 @@ function reconcileLoop() {
 reconcileLoop();
 
 subscribe(
-  ["pane.created", "pane.closed", "pane.exited", "pane.agent_detected"].map((type) => ({ type })),
-  () => schedulePass(true),
+  ["pane.created", "pane.closed", "pane.exited", "pane.agent_detected", "pane.moved"].map((type) => ({ type })),
+  (event) => {
+    if (event?.type === "pane.moved") {
+      try {
+        rebindMovedTask(listTasks(), event, updateTask);
+      } catch (error) {
+        recordHealth("event", "pane.moved", error);
+      }
+    }
+    schedulePass(true);
+  },
   (state) => {
     eventsConnected = state === "connected";
     schedulePass(true);

@@ -73,7 +73,7 @@ function lockOwnerIsAlive(token) {
   }
 }
 
-function withFileLock(file, action) {
+export function withFileLock(file, action) {
   const lock = `${file}.lock`;
   const token = `${process.pid}:${randomUUID()}`;
   const deadline = Date.now() + LOCK_WAIT_MS;

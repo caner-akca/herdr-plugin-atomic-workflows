@@ -7,7 +7,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fmtCost, stagePrompt, tasksForWorkspace } from "./display.mjs";
+import { fmtCost, resolveWorkspaceId, stagePrompt, tasksForWorkspace } from "./display.mjs";
 import { STATE_DIR } from "./plugin-state.mjs";
 import { readHistory, usageOfRun, usageOfStage } from "./ledger.mjs";
 import { focusTask, launchSelectedIssues, launchSelectedReviews } from "./task-launcher.mjs";
@@ -15,7 +15,7 @@ import { readCampaign } from "./task-store.mjs";
 
 const HERDR = process.env.HERDR_BIN_PATH || "herdr";
 const GH = process.env.GH_BIN_PATH || "gh";
-const WORKSPACE_ID = process.env.HERDR_WORKSPACE_ID || "";
+const WORKSPACE_ID = resolveWorkspaceId();
 const RUNS_ROOT = path.join(
   process.env.ATOMIC_WORKFLOW_ARTIFACT_DIR || path.join(os.homedir(), ".atomic", "workflows"),
   "runs",

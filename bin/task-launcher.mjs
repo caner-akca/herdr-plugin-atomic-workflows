@@ -1,14 +1,16 @@
 import { spawnSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
+import { STATE_DIR } from "./plugin-state.mjs";
+import { mkdirSync } from "node:fs";
 import {
   PLUGIN_ID,
   createTask,
   findOpenTask,
   readTask,
   updateCampaign,
-  updateTask,
-} from "./task-store.mjs";
+  updateTask, withFileLock } from "./task-store.mjs";
 
 const HERDR = process.env.HERDR_BIN_PATH || "herdr";
 const WORKFLOW_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -20,6 +22,18 @@ function serializeWorkflowValue(value) {
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
   if (typeof value === "string") return JSON.stringify(value);
   throw new Error(`unsupported workflow input value: ${typeof value}`);
+}
+
+
+// Review F8: admission (find-or-create for one repository+kind+target) runs
+// under a cross-process file lock so two launchers can never both create the
+// same task. The pane launch itself stays outside the lock; a concurrent
+// caller then finds the freshly created non-terminal task and reuses it.
+function withAdmissionLock(repoRoot, kind, target, action) {
+  const locksDir = path.join(STATE_DIR, "locks");
+  mkdirSync(locksDir, { recursive: true, mode: 0o700 });
+  const key = createHash("sha256").update(`${path.resolve(String(repoRoot))}\0${kind}\0${target}`).digest("hex").slice(0, 16);
+  return withFileLock(path.join(locksDir, `admission-${key}`), action);
 }
 
 export function buildWorkflowCommand(workflow, inputs) {
@@ -115,12 +129,20 @@ export function launchQueueTask(campaign, { focus = true } = {}) {
 
 export function launchIssueTask({ campaign, issue, focus = false }) {
   if (!Number.isInteger(issue) || issue < 1) throw new Error(`invalid issue number: ${issue}`);
-  const existing = findOpenTask(campaign.repo_root, "issue-fix", issue);
-  if (existing) {
-    if (focus) focusTask(existing);
-    return { task: existing, existing: true };
+  const admitted = withAdmissionLock(campaign.repo_root, "issue-fix", issue, () => {
+    const existing = findOpenTask(campaign.repo_root, "issue-fix", issue);
+    if (existing) return { task: existing, existing: true };
+    return { task: createIssueTask(campaign, issue), existing: false };
+  });
+  if (admitted.existing) {
+    if (focus) focusTask(admitted.task);
+    return admitted;
   }
-  const created = createTask({
+  return { task: launchTaskPane(admitted.task, { focus }), existing: false };
+}
+
+function createIssueTask(campaign, issue) {
+  return createTask({
     campaignId: campaign.campaign_id,
     kind: "issue-fix",
     target: issue,
@@ -134,17 +156,24 @@ export function launchIssueTask({ campaign, issue, focus = false }) {
     },
     title: `#${issue} fix`,
   });
-  return { task: launchTaskPane(created, { focus }), existing: false };
 }
 
 export function launchReviewTask({ campaign, pr, focus = false }) {
   if (!Number.isInteger(pr) || pr < 1) throw new Error(`invalid PR number: ${pr}`);
-  const existing = findOpenTask(campaign.repo_root, "code-review", pr);
-  if (existing) {
-    if (focus) focusTask(existing);
-    return { task: existing, existing: true };
+  const admitted = withAdmissionLock(campaign.repo_root, "code-review", pr, () => {
+    const existing = findOpenTask(campaign.repo_root, "code-review", pr);
+    if (existing) return { task: existing, existing: true };
+    return { task: createReviewTask(campaign, pr), existing: false };
+  });
+  if (admitted.existing) {
+    if (focus) focusTask(admitted.task);
+    return admitted;
   }
-  const created = createTask({
+  return { task: launchTaskPane(admitted.task, { focus }), existing: false };
+}
+
+function createReviewTask(campaign, pr) {
+  return createTask({
     campaignId: campaign.campaign_id,
     kind: "code-review",
     target: pr,
@@ -156,16 +185,23 @@ export function launchReviewTask({ campaign, pr, focus = false }) {
     inputs: { target: String(pr) },
     title: `PR #${pr} review`,
   });
-  return { task: launchTaskPane(created, { focus }), existing: false };
 }
 
 export function launchSelectedReviews(campaign, prNumbers) {
   const prs = [...new Set(prNumbers.map(Number))];
   if (prs.length === 0) throw new Error("select at least one PR");
   if (prs.length > TASK_LAUNCH_CAP) throw new Error(`a campaign can launch at most ${TASK_LAUNCH_CAP} tasks at once`);
-  const launched = prs.map((pr) => launchReviewTask({ campaign, pr }));
-  const taskIds = [...new Set([...(campaign.task_ids ?? []), ...launched.map(({ task }) => task.task_id)])];
-  updateCampaign(campaign.campaign_id, { status: "running", task_ids: taskIds });
+  const launched = [];
+  for (const pr of prs) {
+    const result = launchReviewTask({ campaign, pr });
+    launched.push(result);
+    // Record each admitted task before the next launch so a later pane
+    // failure never leaves earlier running tasks outside the campaign.
+    campaign = updateCampaign(campaign.campaign_id, {
+      status: "running",
+      task_ids: [...new Set([...(campaign.task_ids ?? []), result.task.task_id])],
+    });
+  }
   return launched;
 }
 
@@ -178,13 +214,16 @@ export function launchSelectedIssues(campaign, issueNumbers) {
   for (const issue of issues) {
     if (!allowed.has(issue)) throw new Error(`issue #${issue} is not in campaign shortlist`);
   }
-  const launched = issues.map((issue) => launchIssueTask({ campaign, issue }));
-  const taskIds = [...new Set([...(campaign.task_ids ?? []), ...launched.map(({ task }) => task.task_id)])];
-  updateCampaign(campaign.campaign_id, {
-    status: "running",
-    selected_issues: [...new Set([...(campaign.selected_issues ?? []), ...issues])],
-    task_ids: taskIds,
-  });
+  const launched = [];
+  for (const issue of issues) {
+    const result = launchIssueTask({ campaign, issue });
+    launched.push(result);
+    campaign = updateCampaign(campaign.campaign_id, {
+      status: "running",
+      selected_issues: [...new Set([...(campaign.selected_issues ?? []), issue])],
+      task_ids: [...new Set([...(campaign.task_ids ?? []), result.task.task_id])],
+    });
+  }
   return launched;
 }
 

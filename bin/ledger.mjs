@@ -17,10 +17,11 @@
 // (F1's no-writes-while-running verdict). Dedupe is by runId via index.json,
 // never atomic's version counter (it resets per process).
 
-import { appendFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { STATE_DIR } from "./plugin-state.mjs";
+import { atomicWriteJson, withFileLock } from "./task-store.mjs";
 
 const LEDGER_DIR = path.join(STATE_DIR, "ledger");
 const INDEX_PATH = path.join(LEDGER_DIR, "index.json");
@@ -39,15 +40,37 @@ export function loadIndex() {
   }
 }
 
-export function saveIndex(index) {
+/** Merge two index entries: an "ended" phase or the newer timestamp wins. */
+export function mergeIndexEntry(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  if (a.phase === b.phase) return (b.ts ?? 0) >= (a.ts ?? 0) ? b : a;
+  return a.phase === "ended" ? a : b;
+}
+
+/** Enforce the index bound: drop the oldest ended runs, never in-flight ones. */
+export function pruneIndex(index, maxRuns = INDEX_MAX_RUNS) {
   const ids = Object.keys(index);
-  if (ids.length > INDEX_MAX_RUNS) {
-    // Drop the oldest ended runs; never drop in-flight ones.
+  if (ids.length > maxRuns) {
     const ended = ids.filter((id) => index[id].phase === "ended").sort((a, b) => (index[a].ts ?? 0) - (index[b].ts ?? 0));
-    for (const id of ended.slice(0, ids.length - INDEX_MAX_RUNS)) delete index[id];
+    for (const id of ended.slice(0, ids.length - maxRuns)) delete index[id];
   }
+  return index;
+}
+
+// Review F19: the write is locked, merged against the on-disk index (another
+// process may have journaled runs we never saw), pruned, and temp+renamed so
+// a crash can never truncate it.
+export function saveIndex(index) {
   mkdirSync(LEDGER_DIR, { recursive: true });
-  writeFileSync(INDEX_PATH, JSON.stringify(index));
+  return withFileLock(INDEX_PATH, () => {
+    const current = loadIndex();
+    const merged = { ...current };
+    for (const [id, entry] of Object.entries(index)) merged[id] = mergeIndexEntry(current[id], entry);
+    pruneIndex(merged);
+    atomicWriteJson(INDEX_PATH, merged);
+    return merged;
+  });
 }
 
 export function appendEntry(cwd, entry) {

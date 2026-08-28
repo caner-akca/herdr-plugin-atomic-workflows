@@ -4,21 +4,17 @@
 // Exits quietly (code 0) when Telegram is simply not configured yet.
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, openSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { STATE_DIR } from "./plugin-state.mjs";
 import { configDir } from "./telegram-config.mjs";
+import { ownerPath, terminateVerifiedOwner } from "./watcher-owner.mjs";
 
 mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
-const pidFile = path.join(STATE_DIR, "telegram.pid");
-
-try {
-  const oldPid = Number(readFileSync(pidFile, "utf8").trim());
-  if (oldPid > 0) process.kill(oldPid, "SIGTERM");
-} catch {
-  // no previous daemon, or already gone
-}
+const pidFile = ownerPath(STATE_DIR, "telegram.pid");
+// Review F1 discipline applies here too: only signal a verified daemon.
+terminateVerifiedOwner(pidFile, "telegram.mjs");
 
 if (!existsSync(path.join(configDir(), ".env"))) {
   console.log(`telegram cockpit not configured (no .env in ${configDir()}); skipping`);
@@ -34,5 +30,5 @@ const child = spawn(process.execPath, [daemon], {
   env: process.env,
 });
 child.unref();
-writeFileSync(pidFile, String(child.pid), { mode: 0o600 });
+writeFileSync(pidFile, `${JSON.stringify({ pid: child.pid, startedAt: Date.now(), script: "telegram.mjs" })}\n`, { mode: 0o600 });
 console.log(`atomic.workflows telegram daemon started (pid ${child.pid}); log: ${logFile}`);

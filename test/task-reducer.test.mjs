@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { reduceTask, selectTaskRun } from "../bin/task-reducer.mjs";
+import { LAUNCH_DEADLINE_MS, rebindMovedTask, reduceTask, selectTaskRun } from "../bin/task-reducer.mjs";
 
 const task = { workflow: "herdr-bug-pipeline", run_id: null, status: "launching", attention: "" };
 
@@ -66,7 +66,7 @@ test("skipped runs remain terminal task results", () => {
   assert.equal(patch.result.summary, "issue already closed");
 });
 
-test("managed task reduction surfaces fresh, stale, and dead status-file ages", () => {
+test("age alone is only ever quiet, never a terminal state (review F2)", () => {
   const nowMs = 1_000_000;
   const snapshot = { runs: [{
     id: "run", name: "herdr-bug-pipeline", status: "running",
@@ -79,13 +79,14 @@ test("managed task reduction surfaces fresh, stale, and dead status-file ages", 
 
   const stale = reduceTask(task, snapshot, { statusMtimeMs: nowMs - 45_001, nowMs });
   assert.equal(stale.liveness, "stale");
-  assert.equal(stale.patch.status, "stale");
-  assert.match(stale.patch.phase, /stale/);
+  assert.equal(stale.patch.status, "running", "status stays truthful");
+  assert.match(stale.patch.phase, /quiet 1m\?/);
 
-  const dead = reduceTask(task, snapshot, { statusMtimeMs: nowMs - 300_001, nowMs });
-  assert.equal(dead.liveness, "dead");
-  assert.equal(dead.patch.status, "dead");
-  assert.match(dead.patch.phase, /dead/);
+  // A long quiet model/build/test call is still running, not dead.
+  const longQuiet = reduceTask(task, snapshot, { statusMtimeMs: nowMs - 900_000, nowMs });
+  assert.equal(longQuiet.liveness, "stale");
+  assert.equal(longQuiet.patch.status, "running");
+  assert.match(longQuiet.patch.phase, /quiet 15m\?/);
 });
 
 test("paused and pending managed runs remain live when the status file is old", () => {
@@ -116,8 +117,9 @@ test("managed liveness covers running snapshots without misclassifying quiet sta
     [{ name: "implement", status: "pending" }],
   ]) {
     const reduced = reduce("running", stages);
-    assert.equal(reduced.liveness, "dead");
-    assert.equal(reduced.patch.status, "dead");
+    assert.equal(reduced.liveness, "stale");
+    assert.equal(reduced.patch.status, "running");
+    assert.match(reduced.patch.phase, /quiet/);
   }
 
   const awaiting = reduce("running", [{
@@ -142,4 +144,33 @@ test("terminal managed runs are unaffected by an old status file", () => {
   assert.equal(reduced.liveness, "fresh");
   assert.equal(reduced.patch.status, "completed");
   assert.equal(reduced.patch.phase, "completed");
+});
+
+test("a runless launching task expires to terminal launch-failed (review F11)", () => {
+  const nowMs = 10_000_000;
+  const young = { ...task, created_at: nowMs - LAUNCH_DEADLINE_MS + 1000 };
+  const youngReduced = reduceTask(young, { runs: [] }, { nowMs });
+  assert.equal(youngReduced.patch.status, "launching");
+  const expired = { ...task, created_at: nowMs - LAUNCH_DEADLINE_MS - 1000 };
+  const expiredReduced = reduceTask(expired, { runs: [] }, { nowMs });
+  assert.equal(expiredReduced.patch.status, "launch-failed");
+  assert.match(expiredReduced.patch.phase, /no run within/);
+  // Already-failed stays failed even after time passes.
+  const already = { ...task, status: "launch-failed", created_at: nowMs - 1000 };
+  assert.equal(reduceTask(already, { runs: [] }, { nowMs }).patch.status, "launch-failed");
+});
+
+test("pane moves rebind the matching task instead of orphaning it (review F9)", () => {
+  const tasks = [
+    { task_id: "a", pane_id: "w1:p2", tab_id: "w1:t2", workspace_id: "w1" },
+    { task_id: "b", pane_id: "w2:p1", tab_id: "w2:t1", workspace_id: "w2" },
+  ];
+  const updates = [];
+  const update = (id, patch) => { updates.push([id, patch]); return patch; };
+  const event = { type: "pane.moved", previous_pane_id: "w1:p2", pane: { pane_id: "w3:p9", tab_id: "w3:t1", workspace_id: "w3" } };
+  assert.ok(rebindMovedTask(tasks, event, update));
+  assert.deepEqual(updates, [["a", { pane_id: "w3:p9", tab_id: "w3:t1", workspace_id: "w3" }]]);
+  assert.equal(rebindMovedTask(tasks, { type: "pane.moved", previous_pane_id: "w9:p9", pane: { pane_id: "x" } }, update), null);
+  assert.equal(rebindMovedTask(tasks, { type: "pane.created" }, update), null);
+  assert.equal(updates.length, 1);
 });

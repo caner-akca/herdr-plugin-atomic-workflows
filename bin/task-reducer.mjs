@@ -3,12 +3,13 @@ import { stagePrompt } from "./display.mjs";
 
 const TERMINAL_RUN = new Set(["completed", "skipped", "failed", "blocked", "killed", "cancelled"]);
 const STALE_MS = 45_000;
-const DEAD_MS = 300_000;
+export const LAUNCH_DEADLINE_MS = 10 * 60_000;
 
+// Review F2: file age alone can only ever mean "quiet" — a long model call,
+// build, test, or remote command legitimately writes nothing for many
+// minutes. Terminal death requires independent pane evidence (pane-gone).
 export function liveness(ageMs) {
-  if (ageMs > DEAD_MS) return "dead";
-  if (ageMs > STALE_MS) return "stale";
-  return "fresh";
+  return ageMs > STALE_MS ? "stale" : "fresh";
 }
 
 export function selectTaskRun(task, snapshot) {
@@ -42,13 +43,21 @@ export function reduceTask(task, snapshot, { paneExists = true, statusMtimeMs, n
     return { run, liveness: live, patch: { status: "pane-gone", phase: "pane gone", attention: "pane exited" } };
   }
   if (!run) {
+    // Review F11: a crash between task creation and run start must not block
+    // this issue/PR forever. A runless task past the deadline becomes the
+    // terminal launch-failed, which frees dedupe for a relaunch.
+    const expired = task.status !== "launch-failed" &&
+      Number.isFinite(task.created_at) && nowMs - task.created_at > LAUNCH_DEADLINE_MS;
+    const failed = task.status === "launch-failed" || expired;
     return {
       run: null,
       liveness: "fresh",
       patch: {
-        status: task.status === "launch-failed" ? "launch-failed" : "launching",
-        phase: task.status === "launch-failed" ? "launch failed" : "launching",
-        attention: task.attention ?? "",
+        status: failed ? "launch-failed" : "launching",
+        phase: failed
+          ? (expired ? `launch failed (no run within ${Math.round(LAUNCH_DEADLINE_MS / 60_000)}m)` : "launch failed")
+          : "launching",
+        attention: failed ? "no workflow run appeared; relaunch from the board" : (task.attention ?? ""),
       },
     };
   }
@@ -66,12 +75,10 @@ export function reduceTask(task, snapshot, { paneExists = true, statusMtimeMs, n
     cost: usageOfRun(run).cost,
   };
   if (live !== "fresh") {
+    // Quiet is presentation, not state: the run's own status stays truthful
+    // and only the phase carries the age marker.
     const ageMs = Math.max(0, nowMs - statusMtimeMs);
-    patch.status = live;
-    patch.phase = live === "dead"
-      ? `[dead? no writes ${Math.round(ageMs / 60_000)}m]`
-      : `${phase} (stale?)`;
-    patch.attention = "";
+    patch.phase = `${phase} (quiet ${Math.max(1, Math.round(ageMs / 60_000))}m?)`;
   }
 
   if (TERMINAL_RUN.has(run.status)) {
@@ -106,4 +113,18 @@ export function taskSummary(task, run) {
     created_at: task.created_at,
     run,
   };
+}
+
+/** Review F9: a pane move changes the public pane id; rebind the matching
+ * task so the next pass does not misread it as pane-gone (terminal). Pure:
+ * the store update function is injected. */
+export function rebindMovedTask(tasks, event, update) {
+  if (event?.type !== "pane.moved" || !event.previous_pane_id || !event.pane?.pane_id) return null;
+  const task = tasks.find((candidate) => candidate.pane_id === event.previous_pane_id);
+  if (!task) return null;
+  return update(task.task_id, {
+    pane_id: event.pane.pane_id,
+    tab_id: event.pane.tab_id ?? task.tab_id,
+    workspace_id: event.pane.workspace_id ?? task.workspace_id,
+  });
 }
