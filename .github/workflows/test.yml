@@ -1,0 +1,24 @@
+name: test
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: [20, 22]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Syntax-check modules and entrypoints
+        run: |
+          for f in bin/*.mjs lib/*.mjs test/*.mjs; do node --check "$f"; done
+      - name: Run tests
+        run: node --test test/*.test.mjs

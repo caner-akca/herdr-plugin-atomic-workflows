@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { LAUNCH_DEADLINE_MS, rebindMovedTask, reduceTask, selectTaskRun } from "../bin/task-reducer.mjs";
+import { LAUNCH_DEADLINE_MS, rebindMovedTask, reduceTask, selectTaskRun } from "../lib/task-reducer.mjs";
 
 const task = { workflow: "herdr-bug-pipeline", run_id: null, status: "launching", attention: "" };
 

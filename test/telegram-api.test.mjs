@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { createApi } from "../bin/telegram-api.mjs";
+import { createApi } from "../lib/telegram-api.mjs";
 
 const TOKEN = "12345:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 

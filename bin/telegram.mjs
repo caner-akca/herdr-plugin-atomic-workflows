@@ -6,12 +6,12 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { STATE_DIR } from "./plugin-state.mjs";
-import { readHistory } from "./ledger.mjs";
-import { createCampaign } from "./task-store.mjs";
-import { launchIssueTask, launchQueueTask, launchReviewTask } from "./task-launcher.mjs";
-import { loadTelegramConfig, roleOf } from "./telegram-config.mjs";
-import { createApi } from "./telegram-api.mjs";
+import { STATE_DIR } from "../lib/plugin-state.mjs";
+import { readHistory } from "../lib/ledger.mjs";
+import { createCampaign } from "../lib/task-store.mjs";
+import { launchIssueTask, launchQueueTask, launchReviewTask } from "../lib/task-launcher.mjs";
+import { loadTelegramConfig, roleOf } from "../lib/telegram-config.mjs";
+import { createApi } from "../lib/telegram-api.mjs";
 import {
   authorize,
   DECISIONS,
@@ -20,7 +20,7 @@ import {
   launchCallback,
   parseCallback,
   parseCommand,
-} from "./telegram-commands.mjs";
+} from "../lib/telegram-commands.mjs";
 import {
   fmtArtifacts,
   fmtCostRollup,
@@ -30,7 +30,7 @@ import {
   fmtStatus,
   fmtTask,
   pushKey,
-} from "./telegram-format.mjs";
+} from "../lib/telegram-format.mjs";
 import {
   assembleHandoff,
   assertServableArtifact,
@@ -38,7 +38,7 @@ import {
   listArtifacts,
   renderGif,
   stagedDiff,
-} from "./telegram-artifacts.mjs";
+} from "../lib/telegram-artifacts.mjs";
 
 const TG_DIR = path.join(STATE_DIR, "telegram");
 const STATE_FILE = path.join(TG_DIR, "state.json");

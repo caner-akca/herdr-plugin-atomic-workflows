@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-import { createCampaign } from "./task-store.mjs";
-import { launchQueueTask } from "./task-launcher.mjs";
+import { createCampaign } from "../lib/task-store.mjs";
+import { launchQueueTask } from "../lib/task-launcher.mjs";
 
 function invocationContext() {
   try {

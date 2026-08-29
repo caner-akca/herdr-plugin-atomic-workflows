@@ -6,8 +6,8 @@ import {
   launchCallback,
   parseCallback,
   parseCommand,
-} from "../bin/telegram-commands.mjs";
-import { parseEnvFile, roleOf } from "../bin/telegram-config.mjs";
+} from "../lib/telegram-commands.mjs";
+import { parseEnvFile, roleOf } from "../lib/telegram-config.mjs";
 
 test("the command grammar is closed and typed", () => {
   assert.deepEqual(parseCommand("/status"), { command: "status" });

@@ -7,9 +7,9 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, openSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { STATE_DIR } from "./plugin-state.mjs";
-import { configDir } from "./telegram-config.mjs";
-import { ownerPath, terminateVerifiedOwner } from "./watcher-owner.mjs";
+import { STATE_DIR } from "../lib/plugin-state.mjs";
+import { configDir } from "../lib/telegram-config.mjs";
+import { ownerPath, terminateVerifiedOwner } from "../lib/watcher-owner.mjs";
 
 mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
 const pidFile = ownerPath(STATE_DIR, "telegram.pid");

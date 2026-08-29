@@ -7,6 +7,38 @@ Atomic session for each selected issue.
 The plugin deliberately stops there. Workflow logic, evidence, code changes,
 questions, pause/resume, and interruption remain inside each Atomic pane.
 
+The watcher, board, ledger, and sidebar layer is workflow-agnostic: it observes
+any Atomic workflow that writes a `status.json`. The launcher and Telegram
+command grammar ship configured for a herdr triage -> fix -> review workflow
+stack as a working reference; adapt the launch commands for your own workflows.
+
+Zero runtime dependencies: plain Node stdlib, no `node_modules`, no build step.
+Everything `herdr plugin install` will run is readable in this repository.
+
+## Install
+
+```bash
+herdr plugin install caner-akca/herdr-plugin-atomic-workflows
+```
+
+A plugin runs as ordinary code under your user with your environment. Read the
+manifest and scripts before installing, as with any editor or shell extension.
+
+## Repository layout
+
+```text
+herdr-plugin.toml   manifest: every command herdr can launch (points into bin/)
+bin/                entrypoints only - thin argv commands and daemons
+lib/                pure logic - no herdr, sockets, or Telegram needed to test
+test/               node --test suite over lib/
+docs/design/        research notes behind the design decisions
+docs/specs/         status-file contract
+```
+
+Invariants: the manifest references only `bin/`; tests import only `lib/`;
+board and viewer only read projections (`board.json`, the ledger) and never
+mutate state - all mutation lives in the watcher.
+
 ## Requirements
 
 - Herdr 0.8.2 or newer.
@@ -151,7 +183,8 @@ message text never reaches a shell; commands are a closed, typed grammar.
 Setup:
 
 1. Create a bot with @BotFather and put secrets in the plugin config dir
-   (`herdr plugin config-dir atomic.workflows`) as `.env`:
+   (`herdr plugin config-dir atomic.workflows`) as `.env`
+   (template: `.env.example`):
 
    ```sh
    TELEGRAM_BOT_TOKEN=123456:abc...
@@ -159,7 +192,7 @@ Setup:
    TELEGRAM_MAINTAINER_CHAT_ID=<optional, for /handoff>
    ```
 
-2. Next to it, `telegram.json`:
+2. Next to it, `telegram.json` (template: `config/telegram.json.example`):
 
    ```json
    {
@@ -191,7 +224,8 @@ repository's `.local` artifact roots and the retained fix worktrees.
 ## Development checks
 
 ```bash
-node --test test/*.test.mjs
-node --check bin/watcher.mjs
-node --check bin/board.mjs
+just check   # syntax-checks bin/, lib/, test/ and runs the test suite
+just test    # tests only (same as: node --test test/*.test.mjs)
 ```
+
+Run `just check` before committing. CI runs the same on Linux and macOS.

@@ -5,8 +5,8 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFile
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { claimOwner, readOwner, stillOwner, terminateVerifiedOwner, verifiedPid } from "../bin/watcher-owner.mjs";
-import { resolveWorkspaceId } from "../bin/display.mjs";
+import { claimOwner, readOwner, stillOwner, terminateVerifiedOwner, verifiedPid } from "../lib/watcher-owner.mjs";
+import { resolveWorkspaceId } from "../lib/display.mjs";
 
 test("owner records parse (including legacy pids) and follow the newest claimant (F1)", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "owner-"));
@@ -50,7 +50,7 @@ test("the ledger index merges concurrent writers, keeps ended wins, and stays pa
     proc.stderr.on("data", (chunk) => { err += chunk; });
     proc.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(err))));
   });
-  const here = path.resolve("bin/ledger.mjs").replaceAll("\\", "/");
+  const here = path.resolve("lib/ledger.mjs").replaceAll("\\", "/");
   const write = (id, phase, ts) =>
     `import { saveIndex } from "file://${here}"; saveIndex({ "${id}": { phase: "${phase}", ts: ${ts} } });`;
   await Promise.all([child(write("run-a", "started", 1)), child(write("run-b", "ended", 2))]);
@@ -82,7 +82,7 @@ test("concurrent launchers admit exactly one task per repo+kind+target (F8)", as
   const stub = path.join(root, "herdr");
   writeFileSync(stub, `#!/bin/sh\nsleep 0.3\necho '{"result":{"type":"plugin_pane_opened","plugin_pane":{"pane":{"pane_id":"w1:p1","tab_id":"w1:t1"}}}}'\n`);
   chmodSync(stub, 0o755);
-  const launcher = path.resolve("bin/task-launcher.mjs").replaceAll("\\", "/");
+  const launcher = path.resolve("lib/task-launcher.mjs").replaceAll("\\", "/");
   const script = `
     import { launchIssueTask } from "file://${launcher}";
     const campaign = { campaign_id: "11111111-1111-4111-8111-111111111111", repo_root: ${JSON.stringify(repo)}, workspace_id: "w1" };

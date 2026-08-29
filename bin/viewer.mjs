@@ -5,7 +5,7 @@
 // j/k/arrows scroll, space/b page, g/G jump, q/esc closes the pane.
 
 import { existsSync, readFileSync } from "node:fs";
-import { sanitizeExternal } from "./display.mjs";
+import { sanitizeExternal } from "../lib/display.mjs";
 import path from "node:path";
 
 const target = process.env.VIEW_TARGET || process.argv[2] || "";

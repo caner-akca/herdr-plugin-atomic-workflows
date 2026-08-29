@@ -17,8 +17,8 @@ fi
 `);
 chmodSync(fakeHerdr, 0o700);
 process.env.HERDR_BIN_PATH = fakeHerdr;
-const store = await import(`../bin/task-store.mjs?test=${Date.now()}`);
-const launcher = await import(`../bin/task-launcher.mjs?test=${Date.now()}`);
+const store = await import(`../lib/task-store.mjs?test=${Date.now()}`);
+const launcher = await import(`../lib/task-launcher.mjs?test=${Date.now()}`);
 
 function fakeRepo() {
   const repo = path.join(state, "repo");
@@ -30,7 +30,7 @@ function fakeRepo() {
 }
 
 function runUpdater(taskId, patchKind, count) {
-  const storeUrl = new URL("../bin/task-store.mjs", import.meta.url).href;
+  const storeUrl = new URL("../lib/task-store.mjs", import.meta.url).href;
   const script = `
     const store = await import(process.argv[1]);
     const [taskId, kind, count] = [process.argv[2], process.argv[3], Number(process.argv[4])];
@@ -54,7 +54,7 @@ function runUpdater(taskId, patchKind, count) {
 }
 
 function runStoppedUpdater(task) {
-  const storeUrl = new URL("../bin/task-store.mjs", import.meta.url).href;
+  const storeUrl = new URL("../lib/task-store.mjs", import.meta.url).href;
   const script = `
     const store = await import(process.argv[1]);
     store.updateTask(process.argv[2], { phase: "x".repeat(64 * 1024 * 1024) });
@@ -176,8 +176,8 @@ test("task cwd comparison accepts a symlinked state directory", async () => {
   const stateAlias = path.join(state, "state-alias");
   mkdirSync(realState);
   symlinkSync(realState, stateAlias);
-  const storeUrl = new URL("../bin/task-store.mjs", import.meta.url).href;
-  const launcherUrl = new URL("../bin/task-launcher.mjs", import.meta.url).href;
+  const storeUrl = new URL("../lib/task-store.mjs", import.meta.url).href;
+  const launcherUrl = new URL("../lib/task-launcher.mjs", import.meta.url).href;
   const script = `
     const { realpathSync } = await import("node:fs");
     const store = await import(process.argv[1]);

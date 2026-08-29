@@ -12,7 +12,7 @@ import {
   latestRunDirs,
   listArtifacts,
   stagedDiff,
-} from "../bin/telegram-artifacts.mjs";
+} from "../lib/telegram-artifacts.mjs";
 
 function fixture() {
   const root = mkdtempSync(path.join(tmpdir(), "tg-artifacts-"));

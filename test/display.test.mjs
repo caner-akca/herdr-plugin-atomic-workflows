@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { sanitizeExternal, taskLabel, tasksForWorkspace } from "../bin/display.mjs";
+import { sanitizeExternal, taskLabel, tasksForWorkspace } from "../lib/display.mjs";
 
 test("managed task labels identify review, issue, and queue panes", () => {
   assert.equal(taskLabel({ kind: "code-review", target: 42, title: "PR #42 review" }), "PR #42 review");

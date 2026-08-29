@@ -29,11 +29,11 @@ import { spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, watch } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fmtCost, stagePrompt, taskLabel } from "./display.mjs";
-import { STATE_DIR } from "./plugin-state.mjs";
-import { appendEntry, loadIndex, saveIndex, usageOfRun, usageOfStage } from "./ledger.mjs";
-import { applyView, VIEW_MARKER } from "./set-view.mjs";
-import { subscribe } from "./herdr-socket.mjs";
+import { fmtCost, stagePrompt, taskLabel } from "../lib/display.mjs";
+import { STATE_DIR } from "../lib/plugin-state.mjs";
+import { appendEntry, loadIndex, saveIndex, usageOfRun, usageOfStage } from "../lib/ledger.mjs";
+import { applyView, VIEW_MARKER } from "../lib/set-view.mjs";
+import { subscribe } from "../lib/herdr-socket.mjs";
 import {
   atomicWriteJson,
   isTerminalTask,
@@ -41,9 +41,9 @@ import {
   readCampaign,
   updateCampaign,
   updateTask,
-} from "./task-store.mjs";
-import { liveness, rebindMovedTask, reduceTask, taskSummary } from "./task-reducer.mjs";
-import { claimOwner, ownerPath, stillOwner } from "./watcher-owner.mjs";
+} from "../lib/task-store.mjs";
+import { liveness, rebindMovedTask, reduceTask, taskSummary } from "../lib/task-reducer.mjs";
+import { claimOwner, ownerPath, stillOwner } from "../lib/watcher-owner.mjs";
 
 const HERDR = process.env.HERDR_BIN_PATH || "herdr";
 const SOURCE = "plugin:atomic.workflows";

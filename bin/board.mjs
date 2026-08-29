@@ -7,11 +7,11 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fmtCost, resolveWorkspaceId, sanitizeExternal, stagePrompt, tasksForWorkspace } from "./display.mjs";
-import { STATE_DIR } from "./plugin-state.mjs";
-import { readHistory, usageOfRun, usageOfStage } from "./ledger.mjs";
-import { focusTask, launchSelectedIssues, launchSelectedReviews } from "./task-launcher.mjs";
-import { readCampaign } from "./task-store.mjs";
+import { fmtCost, resolveWorkspaceId, sanitizeExternal, stagePrompt, tasksForWorkspace } from "../lib/display.mjs";
+import { STATE_DIR } from "../lib/plugin-state.mjs";
+import { readHistory, usageOfRun, usageOfStage } from "../lib/ledger.mjs";
+import { focusTask, launchSelectedIssues, launchSelectedReviews } from "../lib/task-launcher.mjs";
+import { readCampaign } from "../lib/task-store.mjs";
 
 const HERDR = process.env.HERDR_BIN_PATH || "herdr";
 const GH = process.env.GH_BIN_PATH || "gh";

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { splitMessage } from "../bin/telegram-api.mjs";
+import { splitMessage } from "../lib/telegram-api.mjs";
 import {
   fmtArtifacts,
   fmtCostRollup,
@@ -8,7 +8,7 @@ import {
   fmtStatus,
   fmtTask,
   pushKey,
-} from "../bin/telegram-format.mjs";
+} from "../lib/telegram-format.mjs";
 
 const task = {
   title: "#42 fix", kind: "issue-fix", target: 42, status: "needs-input", phase: "implement",

@@ -6,8 +6,8 @@ import { spawn } from "node:child_process";
 import { chmodSync, mkdirSync, openSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { STATE_DIR } from "./plugin-state.mjs";
-import { ownerPath, terminateVerifiedOwner } from "./watcher-owner.mjs";
+import { STATE_DIR } from "../lib/plugin-state.mjs";
+import { ownerPath, terminateVerifiedOwner } from "../lib/watcher-owner.mjs";
 
 // Review F1: never run against the fallback state dir, and never signal a
 // PID whose live command line is not verifiably our watcher.

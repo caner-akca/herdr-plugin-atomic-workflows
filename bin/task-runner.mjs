@@ -4,7 +4,7 @@
 
 import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
-import { resolveTaskFromEnvironment, taskKickoff } from "./task-launcher.mjs";
+import { resolveTaskFromEnvironment, taskKickoff } from "../lib/task-launcher.mjs";
 
 let task;
 try {

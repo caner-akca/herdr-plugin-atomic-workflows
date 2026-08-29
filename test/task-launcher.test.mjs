@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildWorkflowCommand, parsePluginPaneOpen } from "../bin/task-launcher.mjs";
+import { buildWorkflowCommand, parsePluginPaneOpen } from "../lib/task-launcher.mjs";
 
 test("workflow commands serialize typed inputs without shell interpolation", () => {
   assert.equal(
