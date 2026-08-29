@@ -39,3 +39,10 @@ test("values the atomic tokenizer cannot round-trip are refused (review F21)", (
     '/workflow herdr-bug-pipeline repo_dir="/tmp/plain path"',
   );
 });
+
+test("task sessions carry the one-workflow governance leash", async () => {
+  const { TASK_SESSION_LEASH } = await import("../lib/task-launcher.mjs");
+  assert.match(TASK_SESSION_LEASH, /exactly one managed workflow/);
+  assert.match(TASK_SESSION_LEASH, /Never start another workflow/);
+  assert.match(TASK_SESSION_LEASH, /explicit instruction typed by a human/);
+});

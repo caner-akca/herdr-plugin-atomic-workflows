@@ -5,7 +5,7 @@
 import { spawn } from "node:child_process";
 import { appendFileSync, mkdirSync, openSync } from "node:fs";
 import path from "node:path";
-import { resolveTaskFromEnvironment, taskKickoff } from "../lib/task-launcher.mjs";
+import { resolveTaskFromEnvironment, TASK_SESSION_LEASH, taskKickoff } from "../lib/task-launcher.mjs";
 
 // Pre-resolve diagnostics: if resolution fails the pane dies before anyone
 // can read it, so record the observable environment first.
@@ -35,6 +35,10 @@ const args = [
   "--session-dir", task.sessions_dir,
   "--session-id", task.atomic_session_id,
   "--name", task.title,
+  // Governance leash: the pane's main-chat session must never launch
+  // follow-up workflows on its own (observed: an autonomous builtin `goal`
+  // run after a workflow failure).
+  "--append-system-prompt", TASK_SESSION_LEASH,
 ];
 // Reopening an already-bound task must never launch a duplicate workflow.
 if (!task.run_id) args.push(taskKickoff(task));
